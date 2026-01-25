@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evidence Viewer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>html, body { font-family: "Prompt", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }</style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto px-4 py-4">
+    <div class="bg-white border border-slate-200 rounded-2xl p-4 space-y-4">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <div class="text-xs text-slate-500">TH8 Sense DCC • Evidence Viewer</div>
+          <h1 class="text-lg font-semibold">Document Evidence</h1>
+          <div id="meta" class="text-sm text-slate-600 mt-1"></div>
+        </div>
+        <a id="downloadBtn" class="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm" href="#" target="_blank" rel="noreferrer">Open original</a>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div class="lg:col-span-4">
+          <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            <div class="text-xs font-medium text-slate-500">Evidence Context</div>
+            <div id="context" class="mt-2 text-sm"></div>
+
+            <div class="mt-4 flex items-center gap-2">
+              <button id="prevBtn" class="px-3 py-2 rounded-xl border border-slate-200 text-sm hover:bg-white">Prev</button>
+              <button id="nextBtn" class="px-3 py-2 rounded-xl border border-slate-200 text-sm hover:bg-white">Next</button>
+              <div class="ml-auto text-sm text-slate-600">Page <span id="pageNo">-</span></div>
+            </div>
+
+            <div id="hint" class="mt-3 text-xs text-slate-500"></div>
+          </div>
+        </div>
+
+        <div class="lg:col-span-8">
+          <div class="bg-white border border-slate-200 rounded-2xl p-2 rounded-2xl">
+            <canvas id="canvas" class="w-full"></canvas>
+          </div>
+          <div class="text-xs text-slate-500 mt-2">
+            Best-effort highlight: if snippet cannot be auto-highlighted, verify page manually.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const documentId = qs.get("document_id");
+let page = parseInt(qs.get("page") || "1", 10);
+const caseId = qs.get("case_id") || "";
+const ruleId = qs.get("rule_id") || "";
+const snippet = qs.get("snippet") || "";
+
+document.getElementById("context").innerHTML = `
+  <div><span class="font-medium">Case:</span> ${caseId || "-"}</div>
+  <div><span class="font-medium">Rule:</span> ${ruleId || "-"}</div>
+  <div class="mt-2 text-xs text-slate-500">Snippet (best-effort)</div>
+  <div class="mt-1 text-sm bg-white border border-slate-200 rounded-xl p-3">${snippet ? snippet : "—"}</div>
+`;
+
+document.getElementById("meta").textContent = `document_id=${documentId || "-"} • target page=${page}`;
+document.getElementById("pageNo").textContent = page;
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.js";
+
+async function fetchSignedUrl() {
+  const res = await fetch(`/api/v1/documents/${documentId}/open_url`);
+  if (!res.ok) throw new Error("Failed to get signed URL");
+  const data = await res.json();
+  return data.signed_url;
+}
+
+let pdfDoc = null;
+
+async function renderPage(p) {
+  document.getElementById("hint").textContent = snippet
+    ? "Cannot guarantee highlight. Please verify page content manually if needed."
+    : "";
+  document.getElementById("pageNo").textContent = p;
+
+  const pageObj = await pdfDoc.getPage(p);
+  const viewport = pageObj.getViewport({ scale: 1.4 });
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await pageObj.render({ canvasContext: ctx, viewport }).promise;
+}
+
+(async () => {
+  if (!documentId) {
+    document.getElementById("meta").textContent = "Missing document_id";
+    return;
+  }
+  try {
+    const signedUrl = await fetchSignedUrl();
+    document.getElementById("downloadBtn").href = signedUrl;
+    pdfDoc = await pdfjsLib.getDocument(signedUrl).promise;
+    if (page < 1) page = 1;
+    if (page > pdfDoc.numPages) page = pdfDoc.numPages;
+    await renderPage(page);
+  } catch (e) {
+    document.getElementById("meta").textContent = String(e);
+  }
+})();
+
+document.getElementById("prevBtn").addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  page = Math.max(1, page - 1);
+  await renderPage(page);
+});
+document.getElementById("nextBtn").addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  page = Math.min(pdfDoc.numPages, page + 1);
+  await renderPage(page);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.dist-info/
+build/
+dist/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env/
+.env.*
+!.env.example
+
+# =========================
+# Logs & runtime artifacts
+# =========================
+*.log
+logs/
+*.pid
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# =========================
+# Jupyter / Experiments
+# =========================
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# =========================
+# Secrets / Credentials
+# =========================
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+credentials/
+service_account.json
+
+# =========================
+# Supabase
+# =========================
+.supabase/
+supabase/.temp/
+supabase/.branches/
+
+# =========================
+# Vector / Local data
+# =========================
+data/
+tmp/
+.cache/
+*.sqlite
+*.db
+
+# =========================
+# Uploads / Documents (VERY IMPORTANT)
+# =========================
+uploads/
+storage/
+documents/
+*.pdf
+*.docx
+*.xlsx
+
+# =========================
+# Embedding / ML artifacts
+# =========================
+embeddings/
+*.npy
+*.npz
+*.bin
+
+# =========================
+# Test artifacts
+# =========================
+.coverage
+.pytest_cache/
+htmlcov/
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+.env.docker
+
+# =========================
+# Frontend (if monorepo)
+# =========================
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
