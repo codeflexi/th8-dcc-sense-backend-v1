@@ -12,6 +12,17 @@ from app.services.extraction.clause_extractor_llm import ClauseExtractor
 from app.services.extraction.price_table_extractor import extract_price_rows_from_pages
 from app.services.chunking.chunker import chunk_pages
 from app.services.embedding.embedder import Embedder
+from app.services.extraction.header_extractor_llm import HeaderExtractor
+from app.repositories.document_header_repo import DocumentHeaderRepository
+from app.services.extraction.header_deterministic_enricher import HeaderDeterministicEnricher
+from app.services.semantic.semantic_extractor import SemanticExtractor
+from app.services.semantic.semantic_validator import SemanticValidator
+from app.services.semantic.semantic_to_header_mapper import (
+    SemanticToHeaderMapper
+)
+
+
+
 
 @dataclass
 class IngestionCounters:
@@ -32,6 +43,26 @@ class IngestionPipeline:
         self.events = IngestionEventRepository()
         self.embedder = None
         self.clause_extractor = ClauseExtractor()
+        
+        # ✅ MISSING — ต้องมี
+        self.document_header_extractor = HeaderExtractor()
+        self.document_headers = DocumentHeaderRepository()
+        self.enricher = HeaderDeterministicEnricher()
+        self.semantic_extractor = SemanticExtractor()
+        self.semantic_validator = SemanticValidator()
+        self.semantic_mapper = SemanticToHeaderMapper()
+
+    @staticmethod
+    def _merge_non_null(base: dict, overlay: dict) -> dict:
+        """
+        Overlay values only if NOT None.
+        Prevents semantic/deterministic from null-overwriting LLM.
+        """
+        out = dict(base)
+        for k, v in overlay.items():
+            if v is not None:
+                out[k] = v
+        return out
 
     async def run(self, *, job: dict, entity_id: str, entity_type: str, contract_id: str | None, filename: str, content_type: str, data: bytes):
         job_id = job["job_id"]
@@ -59,11 +90,13 @@ class IngestionPipeline:
         self.clauses.delete_by_document(document_id=document_id)
         self.prices.delete_by_document(document_id=document_id)
         self.chunks.delete_by_document(document_id=document_id)
+        #self.document_headers.delete_by_document(document_id=document_id)
 
         
         counters.pages_written = self.pages.replace_pages(document_id=document_id, pages=page_rows)
         self.events.append(job_id=job_id, document_id=document_id, event_type="PAGES_WRITTEN", payload={"count": counters.pages_written})
 
+       
         # STEP 3: clauses (LLM structured)
         self.events.append(job_id=job_id, document_id=document_id, event_type="CLAUSE_EXTRACT_STARTED")
         clause_res = self.clause_extractor.extract_from_pages(pages)
@@ -127,7 +160,7 @@ class IngestionPipeline:
             chunk_rows.append({
                 "document_id": document_id,
                 "page_id": page_id,
-                "chunk_text": ch["text"],
+                  #"chunk_text": ch["text"],
                 "chunk_type": "NARRATIVE",
                 "page_number": ch["page_number"],
                 "content": ch["text"],
@@ -146,7 +179,7 @@ class IngestionPipeline:
             # vecs = self.embedder.embed_texts(texts) if texts else []
             # self.events.append(job_id=job_id, document_id=document_id, event_type="EMBED_OK", payload={"count": len(vecs), "note": "Persist vectors with chunk_id batch update once schema is confirmed"})
             for ch in inserted_chunks:
-                text = ch["chunk_text"]
+                text = ch["content"]
                 vec = self.embedder.embed_texts([text])[0]
                 self.chunks.update_embedding(
                     chunk_id=ch["chunk_id"],

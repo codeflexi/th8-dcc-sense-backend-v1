@@ -22,3 +22,20 @@ class DocumentRepository(BaseRepository):
 
     def update_storage_key(self, document_id: str, storage_key: str):
         self.sb.table(self.TABLE).update({"storage_key": storage_key}).eq("document_id", document_id).execute()
+
+    def find_relational_candidates(
+        self,
+        entity_id: str,
+        contract_id: str | None = None
+    ):
+        q = (
+            self.sb.table(self.TABLE)
+            .select("document_id, entity_id, entity_type, contract_id")
+            .eq("status", "ACTIVE")
+            .or_(
+                f"entity_id.eq.{entity_id}"
+                + (f",contract_id.eq.{contract_id}" if contract_id else "")
+            )
+        )
+        res = q.execute()
+        return res.data or []

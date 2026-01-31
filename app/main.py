@@ -4,6 +4,7 @@ from app.routers.ingestion import router as ingestion_router
 from app.routers.evidence import router as evidence_router
 from app.routers.documents import router as documents_router
 from app.routers.viewer import router as viewer_router
+from app.routers.cases import router as cases_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="TH8 Sense DCC Backend")
@@ -11,6 +12,7 @@ def create_app() -> FastAPI:
     app.include_router(ingestion_router, prefix="/api/v1/ingestion", tags=["ingestion"])
     app.include_router(evidence_router, prefix="/api/v1", tags=["evidence"])
     app.include_router(documents_router, prefix="/api/v1", tags=["documents"])
+    app.include_router(cases_router, prefix="/api/v1", tags=["cases"])
     app.include_router(viewer_router, tags=["viewer"])
     return app
 
