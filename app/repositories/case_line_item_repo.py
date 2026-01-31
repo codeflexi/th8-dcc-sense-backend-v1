@@ -1,8 +1,6 @@
 from app.repositories.base import BaseRepository
 
 
-from app.repositories.base import BaseRepository
-
 
 class CaseLineItemRepository(BaseRepository):
     TABLE = "dcc_case_line_items"

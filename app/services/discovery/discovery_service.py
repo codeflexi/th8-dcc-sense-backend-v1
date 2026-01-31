@@ -3,8 +3,9 @@ from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.document_repo import DocumentRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 from app.repositories.chunk_repo import ChunkRepository
+from app.repositories.vector_discovery_repo import VectorDiscoveryRepository
 from app.services.signal.signal_extraction_service import SignalExtractionService
-from app.infra.supabase_client import get_supabase_client
+from app.services.embedding.embedding_service import EmbeddingService
 
 
 class DiscoveryService:
@@ -17,7 +18,7 @@ class DiscoveryService:
         doc_repo = DocumentRepository()
         link_repo = CaseDocumentLinkRepository()
         chunk_repo = ChunkRepository()
-        sb = get_supabase_client()
+        vector_repo = VectorDiscoveryRepository()
 
         # 1. Load case + snapshot
         case = case_repo.get(case_id)
@@ -49,31 +50,28 @@ class DiscoveryService:
                 inferred_by="RELATIONAL",
                 match_score=1.0,
                 explain={
-                    "counterparty_id": signals.counterparty.counterparty_id,
-                    "technique": "RELATIONAL_MATCH"
+                    "technique": "RELATIONAL_MATCH",
+                    "counterparty_id": signals.counterparty.counterparty_id
                 }
             )
             inferred["relational"] += 1
 
         # ==================================================
-        # 4. Vector Discovery
+        # 4. Vector Discovery (via repo)
         # ==================================================
-        query_embedding = chunk_repo.embed_text(signals.query_context.text)
+        # query_embedding = chunk_repo.embed_text(signals.query_context.text)
+        
+        query_embedding = EmbeddingService.embed(
+        signals.query_context.text
+)
         if not query_embedding:
             return {"case_id": case_id, "status": "no_embedding"}
 
-        res = sb.rpc(
-            "dcc_vector_discover_documents_v1",
-            {
-                "query_embedding": query_embedding,
-                "p_top_k_chunks": 50,
-                "p_top_k_docs": 15,
-                "p_min_similarity": 0.35,
-                "p_top_chunks_per_doc": 3
-            }
-        ).execute()
+        vector_hits = vector_repo.discover_documents(
+            query_embedding=query_embedding
+        )
 
-        for hit in res.data or []:
+        for hit in vector_hits:
             if link_repo.exists(case_id, hit["document_id"]):
                 continue
 

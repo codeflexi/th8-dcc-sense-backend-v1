@@ -20,6 +20,7 @@ from app.services.semantic.semantic_validator import SemanticValidator
 from app.services.semantic.semantic_to_header_mapper import (
     SemanticToHeaderMapper
 )
+from app.services.embedding.embedding_service import EmbeddingService
 
 
 
@@ -51,6 +52,7 @@ class IngestionPipeline:
         self.semantic_extractor = SemanticExtractor()
         self.semantic_validator = SemanticValidator()
         self.semantic_mapper = SemanticToHeaderMapper()
+        self.embed = EmbeddingService()  # Set to False to disable header extraction
 
     @staticmethod
     def _merge_non_null(base: dict, overlay: dict) -> dict:
@@ -175,18 +177,22 @@ class IngestionPipeline:
         try:
             self.events.append(job_id=job_id, document_id=document_id, event_type="EMBED_STARTED")
             self.embedder = self.embedder or Embedder()
+            self.embed = self.embed or EmbeddingService()
             # texts = [r["chunk_text"] for r in chunk_rows][:64]
             # vecs = self.embedder.embed_texts(texts) if texts else []
             # self.events.append(job_id=job_id, document_id=document_id, event_type="EMBED_OK", payload={"count": len(vecs), "note": "Persist vectors with chunk_id batch update once schema is confirmed"})
             for ch in inserted_chunks:
                 text = ch["content"]
-                vec = self.embedder.embed_texts([text])[0]
+                # vec = self.embedder.embed_texts([text])[0]
+                vec = self.embed.embed(text)
                 self.chunks.update_embedding(
                     chunk_id=ch["chunk_id"],
                     embedding=vec
                 )
             self.events.append(job_id=job_id, document_id=document_id, event_type="EMBED_OK", payload={"count": len(inserted_chunks), "note": "Persist vectors with chunk_id batch update once schema is confirmed"})
         except Exception as e:
+            print("Embedded Error")
+            print(str(e))
             warnings.append("EMBEDDING_STALE")
             self.events.append(job_id=job_id, document_id=document_id, event_type="EMBED_FAILED", payload={"error": str(e)})
 
