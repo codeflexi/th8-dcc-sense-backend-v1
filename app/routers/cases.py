@@ -5,6 +5,8 @@ from app.services.case.case_models import CreateCaseFromPORequest,CaseResponse
 from app.services.signal.signal_extraction_service import SignalExtractionService
 from app.repositories.case_repo import CaseRepository
 from app.repositories.case_line_item_repo import CaseLineItemRepository
+from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
+from app.services.evidence.evidence_grouping_service import EvidenceGroupingService
 
 
 router = APIRouter()
@@ -60,3 +62,35 @@ def debug_case_signals(case_id: str):
 
     # 4. Return as JSON (Pydantic -> dict)
     return signals.model_dump()
+
+@router.get("/cases/{case_id}/documents")
+def list_case_documents(case_id: str):
+    repo = CaseDocumentLinkRepository()
+    return {
+        "case_id": case_id,
+        "documents": repo.list_by_case(case_id)
+    }
+
+@router.post("/case-document-links/{link_id}/confirm")
+def confirm_document(link_id: str, body: dict):
+    actor_id = body.get("actor_id")
+    if not actor_id:
+        raise HTTPException(400, "actor_id required")
+
+    repo = CaseDocumentLinkRepository()
+    repo.confirm(link_id, actor_id)
+
+    return {"status": "confirmed", "link_id": link_id}
+
+
+@router.post("/case-document-links/{link_id}/remove")
+def remove_document(link_id: str, body: dict):
+    actor_id = body.get("actor_id")
+    if not actor_id:
+        raise HTTPException(400, "actor_id required")
+
+    repo = CaseDocumentLinkRepository()
+    repo.remove(link_id, actor_id)
+
+    return {"status": "removed", "link_id": link_id}
+

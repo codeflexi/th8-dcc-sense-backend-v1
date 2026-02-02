@@ -7,6 +7,7 @@ from app.routers.viewer import router as viewer_router
 from app.routers.cases import router as cases_router
 from app.routers.discovery import router as discovery_router    
 from app.routers.debug import router as debug_router
+from app.routers.facts import router as facts_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="TH8 Sense DCC Backend")
@@ -17,6 +18,7 @@ def create_app() -> FastAPI:
     app.include_router(cases_router, prefix="/api/v1", tags=["cases"])
     app.include_router(discovery_router, prefix="/api/v1", tags=["discovery"])
     app.include_router(debug_router, prefix="/api/v1", tags=["debug"])
+    app.include_router(facts_router, prefix="/api/v1", tags=["facts"])
     app.include_router(viewer_router, tags=["viewer"])
     return app
 

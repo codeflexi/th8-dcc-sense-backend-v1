@@ -12,3 +12,12 @@ class PriceItemRepository(BaseRepository):
 
     def delete_by_document(self, *, document_id: str):
         self.sb.table(self.TABLE).delete().eq("document_id", document_id).execute()
+        
+    def list_by_document(self, document_id: str):
+        return (
+            self.sb
+            .table(self.TABLE)
+            .select("*")
+            .eq("document_id", document_id)
+            .execute()
+        ).data
