@@ -15,7 +15,6 @@ class SignalExtractionService:
         Cheap, deterministic, recomputable
         """
 
-        # --- Counterparty ---
         counterparty = CounterpartySignal(
             counterparty_id=case.get("entity_id"),
             counterparty_type=case.get("entity_type"),
@@ -23,33 +22,43 @@ class SignalExtractionService:
             source="CASE_CONTEXT"
         )
 
-        # --- Items ---
         items = []
         keywords = []
         text_parts = []
 
-        for li in line_items:
+        for li in (line_items or []):
+            # ---- canonical name key (new) with fallback (old) ----
+            name = li.get("name") or li.get("item_name")
+
+            # ---- unit_price normalize: support dict(new) or number(old) ----
+            up = li.get("unit_price")
+            if isinstance(up, dict):
+                unit_price_value = up.get("value")
+                unit_price_ccy = up.get("currency")
+            else:
+                unit_price_value = up
+                unit_price_ccy = li.get("currency")
+
             item = ItemSignal(
                 sku=li.get("sku"),
-                item_name=li.get("item_name"),
+                item_name=name,
                 quantity=li.get("quantity"),
                 uom=li.get("uom"),
-                unit_price=li.get("unit_price"),
-                currency=li.get("currency"),
+                unit_price=unit_price_value,
+                currency=unit_price_ccy,
             )
             items.append(item)
 
-            if li.get("item_name"):
-                keywords.append(li["item_name"])
-                text_parts.append(li["item_name"])
-
+            # ---- query context ----
+            if name:
+                keywords.append(name)
+                text_parts.append(name)
             if li.get("sku"):
                 keywords.append(li["sku"])
 
-        # --- Query context for vector search ---
         query_context = QueryContextSignal(
-            text=" ".join(text_parts),
-            keywords=list(set(keywords))
+            text=" ".join(text_parts).strip(),
+            keywords=sorted(set([k for k in keywords if k])),
         )
 
         return CaseSignal(

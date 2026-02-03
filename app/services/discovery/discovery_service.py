@@ -48,6 +48,7 @@ class DiscoveryService:
                 case_id=case_id,
                 document_id=doc["document_id"],
                 inferred_by="RELATIONAL",
+    
                 match_score=1.0,
                 explain={
                     "technique": "RELATIONAL_MATCH",

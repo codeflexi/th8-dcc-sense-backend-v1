@@ -1,75 +1,85 @@
-# app/services/evidence/evidence_grouping_service.py
-from collections import defaultdict
-from app.repositories.case_evidence_repo import CaseEvidenceRepository
+from typing import List
+from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_evidence_group_repo import CaseEvidenceGroupRepository
+from app.repositories.case_evidence_repo import CaseEvidenceRepository
 
 
 class EvidenceGroupingService:
     """
-    C.2 Evidence Grouping (LOCKED)
+    C3 — Evidence Grouping (FINAL / ENTERPRISE)
 
-    - Group evidences by business key
-    - EvidenceGroup OWNS evidence_ids[]
+    Contract:
+    - 1 group = 1 PO line item (item_id)
+    - Group is created deterministically from PO snapshot
+    - PRICE evidence is attached here
+    - CLAUSE evidence is NOT attached here
     """
 
-    @staticmethod
-    def group(case_id: str, actor_id: str = "SYSTEM"):
-        ev_repo = CaseEvidenceRepository()
-        group_repo = CaseEvidenceGroupRepository()
+    def __init__(self):
+        self.line_repo = CaseLineItemRepository()
+        self.group_repo = CaseEvidenceGroupRepository()
+        self.evidence_repo = CaseEvidenceRepository()
 
-        evidences = ev_repo.list_by_case(case_id)
+    # =====================================================
+    # Public API
+    # =====================================================
+    def group_case(self, case_id: str) -> List[dict]:
+        """
+        Entry point for C3
+        """
 
-        if not evidences:
-            return {
-                "case_id": case_id,
-                "status": "no_evidence",
-                "groups_created": 0,
-            }
+        po_lines = self.line_repo.list_by_case(case_id)
+        if not po_lines:
+            return []
 
-        groups = defaultdict(list)
+        results: List[dict] = []
 
-        # -------- grouping rule (deterministic) --------
-        for ev in evidences:
-            payload = ev.get("evidence_payload") or {}
+        for line in po_lines:
+            item_id = line.get("item_id")
+            if not item_id:
+                raise RuntimeError(
+                    f"PO line missing item_id (case_id={case_id})"
+                )
 
-            sku = payload.get("sku")
-            item_name = payload.get("item_name")
-
-            if sku:
-                group_key = f"SKU:{sku}"
-            elif item_name:
-                group_key = f"NAME:{item_name}"
-            else:
-                group_key = "UNGROUPED"
-
-            groups[group_key].append(ev)
-
-        groups_created = 0
-
-        for group_key, evs in groups.items():
-            group = group_repo.get_or_create(
+            # 1) Ensure group exists
+            group = self.group_repo.get_or_create(
                 case_id=case_id,
-                group_type="ITEM",
-                group_key=group_key,
-                actor_id=actor_id,
+                anchor_id=item_id,
+            )
+            group_id = group["group_id"]
+
+            # 2) Attach PRICE evidences (anchor-based)
+            evidences = (
+                self.evidence_repo.sb
+                .table("dcc_case_evidences")
+                .select("evidence_id")
+                .eq("case_id", case_id)
+                .eq("anchor_type", "PO_ITEM")
+                .eq("anchor_id", item_id)
+                .eq("evidence_type", "PRICE")
+                .is_("group_id", None)
+                .execute()
+                .data or []
             )
 
-            evidence_ids = [e["evidence_id"] for e in evs]
+            if evidences:
+                evidence_ids = []
 
-            # persist ownership
-            group_repo.update_evidence_ids(
-                group_id=group["group_id"],
-                evidence_ids=evidence_ids,
-            )
+                for ev in evidences:
+                    self.evidence_repo.attach_to_group(
+                        evidence_id=ev["evidence_id"],
+                        group_id=group_id,
+                    )
+                    evidence_ids.append(ev["evidence_id"])
 
-            # optional backlink (trace only)
-            for ev_id in evidence_ids:
-                ev_repo.attach_to_group(ev_id, group["group_id"])
+                # keep denormalized list for audit only
+                self.group_repo.update_evidence_ids(
+                    group_id=group_id,
+                    evidence_ids=list(
+                        set((group.get("evidence_ids") or []) + evidence_ids)
+                    ),
+                )
 
-            groups_created += 1
+            results.append(group)
 
-        return {
-            "case_id": case_id,
-            "status": "evidence_grouped",
-            "groups_created": groups_created,
-        }
+        return results
