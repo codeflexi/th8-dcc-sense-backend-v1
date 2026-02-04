@@ -1,8 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query , Path, status
 from typing import Dict, Any
 
 from app.infra.supabase_client import get_supabase
 from app.services.decision.selection_service import SelectionService
+
+from app.services.decision.decision_run_service import DecisionRunService
+from app.services.decision.selection_service import SelectionService
+
+from app.repositories.decision_run_repo import DecisionRunRepository
+from app.repositories.case_decision_result_repo import CaseDecisionResultRepository
+from app.repositories.case_evidence_group_repo import CaseEvidenceGroupRepository
+from app.repositories.case_line_item_repo import CaseLineItemRepository
+from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 
 router = APIRouter(
 )
@@ -51,3 +60,97 @@ def run_selection_for_case(
         "domain": domain,
         "selection": result,
     }
+
+
+# =========================================================
+# POST /cases/{case_id}/decision-run
+# =========================================================
+@router.post(
+    "/{case_id}/decision-run",
+    status_code=status.HTTP_200_OK,
+    summary="Run TH8 SENSE Decision Engine (C4)",
+    description="""
+Execute deterministic, evidence-first decision run (C4).
+
+Flow:
+1) Run Technical Selection (C3.5)
+2) Consume selection → evaluate rules (C4)
+3) Persist audit-grade results
+"""
+)
+def run_decision_for_case(
+    case_id: str = Path(..., description="Case ID"),
+    domain_code: str = "procurement",
+    sb=Depends(get_supabase),
+) -> Dict[str, Any]:
+    """
+    Orchestration layer only:
+    - compose repositories
+    - run C3.5 selection
+    - run C4 decision
+    """
+
+    try:
+        # =================================================
+        # Compose repositories
+        # =================================================
+        run_repo = DecisionRunRepository()
+        result_repo = CaseDecisionResultRepository()
+        group_repo = CaseEvidenceGroupRepository()
+        case_line_repo = CaseLineItemRepository()
+        doc_link_repo = CaseDocumentLinkRepository()
+
+        # =================================================
+        # Step 1: Technical Selection (C3.5)
+        # =================================================
+        selection_service = SelectionService(
+           
+        )
+
+        selection = selection_service.select_for_case(
+            case_id=case_id,
+            domain_code=domain_code,
+        )
+
+        # =================================================
+        # Step 2: Decision Run (C4)
+        # =================================================
+        decision_service = DecisionRunService(
+            run_repo=run_repo,
+            result_repo=result_repo,
+            group_repo=group_repo,
+            case_line_repo=case_line_repo,
+            doc_link_repo=doc_link_repo,
+            policy_path="app/policies/sense_policy_mvp.yaml",
+        )
+
+        result = decision_service.run_case(
+            case_id=case_id,
+            domain_code=domain_code,
+            selection=selection,
+        )
+
+        return {
+            "status": "OK",
+            "case_id": case_id,
+            "domain": domain_code,
+            "run_id": result["run_id"],
+            "decision": result["decision"],
+            "risk_level": result["risk_level"],
+            "confidence": result["confidence"],
+            "groups": result["groups"],
+        }
+
+    except ValueError as ve:
+        # deterministic / validation error
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+
+    except Exception as e:
+        # unexpected system error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Decision run failed: {str(e)}",
+        )

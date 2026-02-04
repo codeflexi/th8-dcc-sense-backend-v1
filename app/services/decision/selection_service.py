@@ -23,6 +23,7 @@ from app.services.policy.resolver import resolve_domain_policy
 
 class SelectionService:
     def __init__(self):
+        super().__init__()
         self.case_line_repo = CaseLineItemRepository()
         self.group_repo = CaseEvidenceGroupRepository()
         self.evidence_repo = CaseEvidenceRepository()
@@ -250,11 +251,17 @@ class SelectionService:
         if anchor_type == "PO_ITEM" and anchor_id:
             po_line = po_by_item_id.get(anchor_id)
 
+        # currency = (
+        #     (po_line or {}).get("unit_price", {}).get("currency")
+        #     or self._fact_currency(fact_map)
+        #     or currency_default
+        # )
         currency = (
-            (po_line or {}).get("unit_price", {}).get("currency")
+            (po_line or {}).get("currency")
             or self._fact_currency(fact_map)
             or currency_default
         )
+
 
         return {
             "domain": domain_code,
