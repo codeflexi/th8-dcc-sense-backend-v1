@@ -1,0 +1,253 @@
+# =========================================================
+# TH8 Sense DCC — Policy YAML (Enterprise v1)
+# Multi-domain, deterministic, audit-ready
+# =========================================================
+
+meta:
+  policy_id: TH8-Sense
+  version: v1.0
+  description: >
+    Enterprise policy. Deterministic. Evidence-first. Multi-domain.
+  defaults:
+    currency: THB
+    rounding:
+      money_decimals: 2
+      pct_decimals: 2
+
+# =========================================================
+# DOMAIN PACKS (LOCKED SHAPE)
+# =========================================================
+domains:
+
+  procurement:
+    description: Procurement decision control
+    profile:
+      baseline_priority:
+        - T_CONTRACT_MIN_PRICE
+        - T_CONTRACT_DIRECT_PRICE
+        - T_LAST_OBSERVED_PRICE
+        - T_MEDIAN_12M_PRICE
+        - T_NO_BASELINE_ESCALATE
+
+    # -------------------------
+    # Calculations (Data Layer)
+    # -------------------------
+    calculations:
+      variance_pct:
+        description: Percent variance between PO unit price and baseline price
+        # unit is IMPORTANT: percentage (e.g., 6.25 means 6.25%)
+        unit: PERCENT
+        formula_id: PCT_DIFF
+        inputs:
+          po_unit_price_value: "$po.unit_price.value"
+          baseline_price_value: "$selection.baseline.value"
+        guards:
+          - not_null: ["po_unit_price_value", "baseline_price_value"]
+          - non_zero: ["baseline_price_value"]
+        output:
+          field: "variance_pct"
+          rounding: pct_decimals
+
+      contract_breach:
+        description: PO price higher than baseline (contract)
+        unit: BOOLEAN
+        formula_id: GT
+        inputs:
+          left_value: "$po.unit_price.value"
+          right_value: "$selection.baseline.value"
+        guards:
+          - not_null: ["left_value", "right_value"]
+        output:
+          field: "contract_breach"
+
+    # -------------------------
+    # Techniques (C3.5)
+    # -------------------------
+    techniques:
+      - id: T_CONTRACT_MIN_PRICE
+        category: BASELINE
+        description: Use minimum contract price as baseline
+        required_facts: [CONTRACT_PRICE]
+        gates:
+          currency_match: true
+          min_confidence:
+            evidence_type: PRICE
+            threshold: 0.80
+        derive:
+          baseline_from: CONTRACT_PRICE
+          method_required: MIN_CONTRACT_PRICE
+
+      - id: T_CONTRACT_DIRECT_PRICE
+        category: BASELINE
+        description: Use contract price as baseline
+        required_facts: [CONTRACT_PRICE]
+        gates:
+          currency_match: true
+        derive:
+          baseline_from: CONTRACT_PRICE
+
+      - id: T_LAST_OBSERVED_PRICE
+        category: BASELINE
+        description: Use last observed price as baseline
+        required_facts: [LAST_OBSERVED_PRICE]
+        gates: {}
+        derive:
+          baseline_from: LAST_OBSERVED_PRICE
+
+      - id: T_MEDIAN_12M_PRICE
+        category: BASELINE
+        description: Use median 12 months price as baseline
+        required_facts: [MEDIAN_12M]
+        gates: {}
+        derive:
+          baseline_from: MEDIAN_12M
+
+      - id: T_NO_BASELINE_ESCALATE
+        category: FALLBACK
+        description: No reliable baseline available
+        outcome:
+          readiness_flag: baseline_available=false
+          required_action: REVIEW
+
+    # -------------------------
+    # Rules (C4)
+    # -------------------------
+    rules:
+
+      - rule_id: P-PRICE-01
+        group: PRICE
+        severity: MED
+        description: Price variance vs selected baseline
+        preconditions:
+          baseline_available: true
+        uses: ["variance_pct"]        # <<< key change (enterprise-grade)
+        logic:
+          type: compare
+          field: variance_pct
+          operator: ">"
+          value: 3                   # percent
+        fail_actions:
+          - REVIEW
+        explanation:
+          exec: "ราคาขอซื้อสูงกว่าราคาฐานเกินเกณฑ์"
+          audit: "PO variance {variance_pct}% exceeds threshold 3%"
+
+      - rule_id: P-CONTRACT-01
+        group: PRICE
+        severity: HIGH
+        description: Contract price breach
+        preconditions:
+          baseline_source: CONTRACT_PRICE
+        uses: ["contract_breach"]
+        logic:
+          type: compare
+          field: contract_breach
+          operator: "=="
+          value: true
+        fail_actions:
+          - REVIEW
+        explanation:
+          exec: "ราคาซื้อสูงกว่าราคาตามสัญญา"
+          audit: "PO price exceeds contract baseline"
+
+      - rule_id: P-DOC-01
+        group: PROCESS
+        severity: HIGH
+        description: Required procurement documents
+        preconditions: {}
+        uses: []                      # no calc required
+        logic:
+          type: document_presence
+          required_docs: [CONTRACT, QUOTATION]
+        fail_actions:
+          - REVIEW
+        explanation:
+          exec: "เอกสารจัดซื้อไม่ครบ"
+          audit: "Missing required documents: {missing_docs}"
+
+
+  finance_ap:
+    description: Accounts Payable control
+    profile:
+      baseline_priority:
+        - T_INVOICE_MATCH_BASE
+        - T_NO_BASELINE_ESCALATE
+
+    calculations:
+      # Placeholder: when you add AP artifacts later, you add here first
+      duplicate_invoice_flag:
+        description: Duplicate invoice detection flag
+        unit: BOOLEAN
+        formula_id: DUP_INVOICE
+        inputs:
+          invoice_number: "$ap.invoice.invoice_number"
+          vendor_id: "$ap.invoice.vendor_id"
+        guards:
+          - not_null: ["invoice_number", "vendor_id"]
+        output:
+          field: "duplicate_invoice_flag"
+
+    techniques:
+      - id: T_INVOICE_MATCH_BASE
+        category: BASELINE
+        description: Invoice-centric baseline for reconciliation
+        required_artifacts: [PO, INVOICE]
+        gates: {}
+        derive:
+          baseline_from: INVOICE
+
+      - id: T_NO_BASELINE_ESCALATE
+        category: FALLBACK
+        description: No reliable baseline available
+        outcome:
+          readiness_flag: baseline_available=false
+          required_action: REVIEW
+
+    rules:
+      - rule_id: A-REC-01
+        group: COMPLIANCE
+        severity: HIGH
+        description: 3-way matching
+        preconditions:
+          artifacts_present: [PO, GR, INVOICE]
+        uses: []
+        logic:
+          type: three_way_match
+          fields: [quantity, unit_price]
+        fail_actions:
+          - REVIEW
+        explanation:
+          exec: "ข้อมูล PO / รับของ / ใบแจ้งหนี้ไม่ตรงกัน"
+          audit: "3-way match failed: {mismatches}"
+
+      - rule_id: A-FRAUD-01
+        group: FRAUD
+        severity: HIGH
+        description: Duplicate invoice detection
+        preconditions: {}
+        uses: ["duplicate_invoice_flag"]
+        logic:
+          type: compare
+          field: duplicate_invoice_flag
+          operator: "=="
+          value: true
+        fail_actions:
+          - REVIEW
+        explanation:
+          exec: "พบใบแจ้งหนี้ซ้ำ"
+          audit: "Duplicate invoice detected"
+
+# =========================================================
+# DECISION AGGREGATION (LOCKED SHAPE)
+# =========================================================
+decision_logic:
+  outcomes:
+    APPROVE:
+      conditions:
+        - no_fail_severity_greater_equal: HIGH
+    REVIEW:
+      conditions:
+        - any_fail_severity_in: [MED, HIGH]
+    REJECT:
+      conditions:
+        - any_fail_severity_equal: CRITICAL

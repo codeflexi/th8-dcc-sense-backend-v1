@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Dict, Any, Optional
 
 from fastapi.encoders import jsonable_encoder
 
@@ -14,9 +14,10 @@ class CaseDecisionResultRepository(BaseRepository):
     """
 
     TABLE = "dcc_case_decision_results"
+    RUN_TABLE = "dcc_decision_runs"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self,sb):
+        super().__init__(sb)
 
     def _encode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure supabase client never sees datetime/Decimal/UUID objects
@@ -65,3 +66,48 @@ class CaseDecisionResultRepository(BaseRepository):
             .execute()
         )
         return res.data or []
+
+    def get_latest_by_group(
+        self,
+        *,
+        group_id: str,
+    ) -> Optional[Dict[str, Any]]:
+
+        # 1) Get COMPLETED run_ids
+        runs_res = (
+            self.sb
+            .table(self.RUN_TABLE)
+            .select("run_id")
+            .eq("run_status", "COMPLETED")
+            .execute()
+        )
+
+        run_ids = [r["run_id"] for r in (runs_res.data or [])]
+        if not run_ids:
+            return None
+
+        # 2) Get latest result for group
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .select("""
+                result_id,
+                run_id,
+                group_id,
+                decision_status,
+                risk_level,
+                confidence,
+                reason_codes,
+                fail_actions,
+                trace,
+                evidence_refs,
+                created_at
+            """)
+            .eq("group_id", group_id)
+            .in_("run_id", run_ids)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        return res.data[0] if res.data else None

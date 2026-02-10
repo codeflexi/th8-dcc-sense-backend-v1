@@ -6,6 +6,13 @@ class VectorDiscoveryRepository(BaseRepository):
     Encapsulate vector-based document discovery (pgvector / rpc)
     """
     RPC_NAME = "dcc_vector_discover_documents_v1"
+    
+    # =====================================================
+    # Constructor (REQUIRED)
+    # =====================================================
+    def __init__(self, sb):
+        super().__init__(sb)
+
      
     def discover_documents(
         self,
@@ -15,7 +22,18 @@ class VectorDiscoveryRepository(BaseRepository):
         min_similarity: float = 0.35,
         top_chunks_per_doc: int = 3,
     ) -> list[dict]:
+        """
+        Vector-based document discovery via Postgres RPC
 
+        Deterministic:
+        - No side effects
+        - Read-only
+        - Audit-safe
+        """
+
+        if not query_embedding:
+            raise ValueError("query_embedding is required")
+        
         res = self.sb.rpc(
             self.RPC_NAME,
             {

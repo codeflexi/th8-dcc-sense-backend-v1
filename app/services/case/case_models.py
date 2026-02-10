@@ -1,5 +1,6 @@
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Optional ,Any, Dict, Optional, List
+from pydantic import BaseModel, Field , ConfigDict
+from datetime import datetime
 
 
 class POLineItemInput(BaseModel):
@@ -32,3 +33,42 @@ class CaseResponse(BaseModel):
     reference_type: str
     reference_id: str
     status: str
+
+
+
+class CaseListItem(BaseModel):
+    """
+    1 row จาก vw_case_list
+    """
+    model_config = ConfigDict(extra="allow")
+
+    case_id: str
+
+    entity_id: Optional[str] = None
+    entity_type: Optional[str] = None
+    domain: Optional[str] = None
+
+    reference_type: Optional[str] = None
+    reference_id: Optional[str] = None
+
+    contract_id: Optional[str] = None
+    amount_total: Optional[float] = None
+    currency: Optional[str] = None
+
+    status: Optional[str] = None
+    decision: Optional[str] = None
+    risk_level: Optional[str] = None
+    confidence_score: Optional[float] = None
+
+    case_detail: Optional[Dict[str, Any]] = None
+
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class CaseListResponse(BaseModel):
+    items: List[CaseListItem]
+    page: int
+    limit: int
+    total: Optional[int] = None

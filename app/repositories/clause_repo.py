@@ -2,6 +2,13 @@ from app.repositories.base import BaseRepository
 
 class ClauseRepository(BaseRepository):
     TABLE = "dcc_contract_clauses"
+    # =====================================================
+    # Constructor (REQUIRED)
+    # =====================================================
+    def __init__(self, sb):
+        super().__init__(sb)
+
+
 
     def replace_by_contract(self, *, contract_id: str, rows: list[dict]) -> int:
         self.sb.table(self.TABLE).delete().eq("contract_id", contract_id).execute()

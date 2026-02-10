@@ -1,6 +1,9 @@
 # app/repositories/case_evidence_group_repo.py
 
-from app.repositories.base import BaseRepository
+from app.repositories.base import BaseRepository, json_safe
+from typing import Dict, Any, List
+from app.repositories.case_evidence_repo import CaseEvidenceRepository
+from app.repositories.document_repo import DocumentRepository
 
 
 class CaseEvidenceGroupRepository(BaseRepository):
@@ -23,17 +26,10 @@ class CaseEvidenceGroupRepository(BaseRepository):
         self,
         *,
         case_id: str,
-        anchor_id: str,                 # MUST be PO item_id (uuid)
+        anchor_id: str,
         claim_type: str = "PRICE_BASELINE",
         actor_id: str = "SYSTEM",
     ) -> dict:
-        """
-        Deterministic group creation.
-
-        IMPORTANT:
-        - anchor_type is ALWAYS 'PO_ITEM'
-        - group_key / semantic_key are informational only
-        """
 
         if not anchor_id:
             raise ValueError("anchor_id (PO item_id) is required")
@@ -60,7 +56,7 @@ class CaseEvidenceGroupRepository(BaseRepository):
             "group_type": "ITEM",
             "claim_type": claim_type,
 
-            # informational only (NO LOGIC DEPENDS ON THIS)
+            # informational only
             "group_key": f"PO_ITEM:{anchor_id}",
             "semantic_key": f"PO_ITEM:{anchor_id}",
 
@@ -100,3 +96,63 @@ class CaseEvidenceGroupRepository(BaseRepository):
             .execute()
         )
         return res.data or []
+
+    # =================================================
+    # Evidence Pack (FIXED)
+    # =================================================
+    def get_group_evidence(
+        self,
+        *,
+        case_id: str,
+        group_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Enterprise-grade evidence pack builder
+        - Uses injected sb (NO manual repo creation)
+        - Deterministic
+        - Audit-safe
+        """
+
+        evidence_repo = CaseEvidenceRepository(self.sb)
+        doc_repo = DocumentRepository(self.sb)
+
+        evidences = evidence_repo.list_by_group(
+            case_id=case_id,
+            group_id=group_id,
+        )
+
+        documents: Dict[str, Dict[str, Any]] = {}
+        items: List[Dict[str, Any]] = []
+
+        for e in evidences:
+            document_id = e.get("document_id")
+
+            if document_id and document_id not in documents:
+                doc = doc_repo.get(document_id)
+                if doc:
+                    documents[document_id] = {
+                        "document_id": doc.get("document_id"),
+                        "file_name": doc.get("file_name"),
+                        "document_type": doc.get("document_type"),
+                        "metadata": doc.get("metadata"),
+                    }
+
+            items.append({
+                "evidence_id": e.get("evidence_id"),
+                "fact_id": e.get("fact_id"),
+
+                "document_id": document_id,
+                "page_number": e.get("page_number"),
+
+                "highlight": e.get("highlight"),
+                "content": e.get("content"),
+
+                "created_at": e.get("created_at"),
+            })
+
+        return json_safe({
+            "case_id": case_id,
+            "group_id": group_id,
+            "documents": list(documents.values()),
+            "evidences": items,
+        })

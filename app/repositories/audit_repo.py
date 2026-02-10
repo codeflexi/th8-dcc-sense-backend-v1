@@ -1,9 +1,14 @@
 from app.repositories.base import BaseRepository
 from typing import List, Optional , Dict, Any
-from datetime import datetime
+from datetime import datetime , timezone
+from fastapi.encoders import jsonable_encoder
 
 class AuditRepository(BaseRepository):
+    
     TABLE = "dcc_audit_events"
+    
+    def __init__(self, sb):
+        super().__init__(sb)
 
     def latest_decision_run(self, case_id: str) -> dict | None:
         res = (
@@ -15,6 +20,7 @@ class AuditRepository(BaseRepository):
             .limit(1)
             .execute()
         )
+        
         return res.data[0] if res.data else None
         # -------------------------
     # Write Audit Event
@@ -25,17 +31,21 @@ class AuditRepository(BaseRepository):
         event_type: str,
         actor: str,
         payload: dict,
+        run_id: Optional[str] = None,
     ) -> None:
-        self.sb.table(self.TABLE).insert(
+        res = self.sb.table(self.TABLE).insert(
             {
                 "case_id": case_id,
                 "event_type": event_type,
                 "actor": actor,
-                "payload": payload or {},
-                "created_at": datetime.utcnow().isoformat(),
+                "payload": jsonable_encoder(payload or {}),
+                "run_id": run_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
-
+        
+        return res.data[0] if res.data else None
+        
 
     # -------------------------
     # REQUIRED by AuditRepository
@@ -70,7 +80,7 @@ class AuditRepository(BaseRepository):
         """
         res = (
             self.sb
-            .table("audit_events")
+            .table(self.TABLE)
             .select("*")
             .gt("created_at", since_ts)
             .order("created_at", desc=False)

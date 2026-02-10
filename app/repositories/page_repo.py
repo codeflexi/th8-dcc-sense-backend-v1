@@ -13,3 +13,15 @@ class PageRepository(BaseRepository):
     def resolve_page_id(self, *, document_id: str, page_number: int) -> str | None:
         res = self.sb.table(self.TABLE).select("page_id").eq("document_id", document_id).eq("page_number", page_number).limit(1).execute()
         return res.data[0]["page_id"] if res.data else None
+
+    def get_page(self, document_id: str, page_no: int) -> dict | None:
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .select("*")
+            .eq("document_id", document_id)
+            .eq("page_number", page_no)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None

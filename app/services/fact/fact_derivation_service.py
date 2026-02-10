@@ -14,15 +14,39 @@ class FactDerivationService:
     - Fact OWNED by group_id
     - Derive only from evidences attached to group
     - PRICE evidence only
+
+    ENTERPRISE CONSTRAINT (ADDED):
+    - Repositories MUST be constructed with sb (single lifecycle)
+    - No Repo() without sb
     """
 
-    @staticmethod
-    def derive(case_id: str, actor_id: str = "SYSTEM") -> Dict:
-        group_repo = CaseEvidenceGroupRepository()
-        evidence_repo = CaseEvidenceRepository()
-        fact_repo = CaseFactRepository()
+    # ------------------------------------------------------------------
+    # CHANGED: switch from @staticmethod to instance method with sb
+    # WHY:
+    # - staticmethod prevents dependency injection
+    # - causes Repo() without sb → inconsistent DB client
+    # ------------------------------------------------------------------
+    def __init__(self, *, sb):
+        self.sb = sb
 
-        groups = group_repo.list_by_case(case_id)
+        # CHANGED: inject sb into repositories
+        # WHY: enforce single Supabase client lifecycle
+        self.group_repo = CaseEvidenceGroupRepository(sb)
+        self.evidence_repo = CaseEvidenceRepository(sb)
+        self.fact_repo = CaseFactRepository(sb)
+
+    # ------------------------------------------------------------------
+    # CHANGED: remove @staticmethod
+    # WHY:
+    # - needs access to injected repositories
+    # - preserves deterministic behavior
+    # ------------------------------------------------------------------
+    def derive(self, case_id: str, actor_id: str = "SYSTEM") -> Dict:
+        # NOTE:
+        # logic below is intentionally kept 1:1 with original
+        # only repository access pattern has changed
+
+        groups = self.group_repo.list_by_case(case_id)
 
         if not groups:
             return {
@@ -39,7 +63,17 @@ class FactDerivationService:
             # ✅ DB requires NOT NULL
             fact_key = group.get("group_key") or f"GROUP:{group_id}"
 
-            evidences = evidence_repo.list_by_group(group_id)
+            # ------------------------------------------------------------------
+            # CHANGED:
+            #   evidences = evidence_repo.list_by_group(group_id)
+            # → evidences = self.evidence_repo.list_by_group_id(group_id)
+            #
+            # WHY:
+            # - Contract: Evidence OWNED by group_id only
+            # - Avoid legacy overloaded list_by_group signatures
+            # - Deterministic + audit-safe
+            # ------------------------------------------------------------------
+            evidences = self.evidence_repo.list_by_group_id(group_id)
             if not evidences:
                 continue
 
@@ -71,7 +105,7 @@ class FactDerivationService:
             if contract_prices:
                 value, currency = min(contract_prices, key=lambda x: x[0])
 
-                fact_repo.upsert_fact({
+                self.fact_repo.upsert_fact({
                     "case_id": case_id,
                     "group_id": group_id,
                     "fact_type": "CONTRACT_PRICE",
@@ -99,7 +133,7 @@ class FactDerivationService:
                 value = float(median(prices))
                 currency = next((c for _, c in historical_prices if c), None)
 
-                fact_repo.upsert_fact({
+                self.fact_repo.upsert_fact({
                     "case_id": case_id,
                     "group_id": group_id,
                     "fact_type": "MEDIAN_12M",
@@ -125,7 +159,7 @@ class FactDerivationService:
             if historical_prices:
                 value, currency = historical_prices[-1]
 
-                fact_repo.upsert_fact({
+                self.fact_repo.upsert_fact({
                     "case_id": case_id,
                     "group_id": group_id,
                     "fact_type": "LAST_OBSERVED_PRICE",

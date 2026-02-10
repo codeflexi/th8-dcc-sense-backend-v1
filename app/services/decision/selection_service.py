@@ -8,6 +8,10 @@ Contract:
 - Group anchor = (anchor_type='PO_ITEM', anchor_id=dcc_case_line_items.item_id)
 
 This service must be deterministic, auditable, and production-safe.
+
+Enterprise rule:
+- NO Repo() without sb injection
+- Services own repositories via injected sb (single lifecycle)
 """
 
 from typing import Dict, Any, List, Optional
@@ -22,12 +26,23 @@ from app.services.policy.resolver import resolve_domain_policy
 
 
 class SelectionService:
-    def __init__(self):
-        super().__init__()
-        self.case_line_repo = CaseLineItemRepository()
-        self.group_repo = CaseEvidenceGroupRepository()
-        self.evidence_repo = CaseEvidenceRepository()
-        self.fact_repo = CaseFactRepository()
+    """
+    Technical Selection (C3.5)
+    - Deterministic selection of baseline technique per group_id
+    - Consumes:
+        - dcc_case_evidence_groups (groups for case)
+        - dcc_case_facts (facts owned by group_id)
+        - dcc_case_evidences (evidence attached to group_id)
+        - dcc_case_line_items (optional PO context via anchor_id)
+    """
+
+    def __init__(self, *, sb):
+        # IMPORTANT: enforce single sb lifecycle; never construct repos without sb
+        self.sb = sb
+        self.case_line_repo = CaseLineItemRepository(sb)
+        self.group_repo = CaseEvidenceGroupRepository(sb)
+        self.evidence_repo = CaseEvidenceRepository(sb)
+        self.fact_repo = CaseFactRepository(sb)
 
     # =====================================================
     # Public API
@@ -44,6 +59,7 @@ class SelectionService:
         po_lines = self.case_line_repo.list_by_case(case_id)
         po_by_item_id = self._index_po_lines_by_item_id(po_lines)
 
+        # groups are case-scoped (anchor lives in group)
         groups = self.group_repo.list_by_case(case_id)
 
         results: List[Dict[str, Any]] = []
@@ -74,7 +90,7 @@ class SelectionService:
         selected = None
 
         # Deterministic: UNGROUPED never attempts baselines
-        if group_ctx["group_key"] == "UNGROUPED":
+        if group_ctx.get("group_key") == "UNGROUPED":
             selected = self._fallback()
             trace.append(selected)
             return self._result(group_ctx, selected, trace)
@@ -164,7 +180,6 @@ class SelectionService:
         errs: List[str] = []
 
         # currency gate MUST NOT depend on PO
-        # if currency missing both in PO+facts -> fail
         if gates.get("currency_match") is True:
             if not ctx.get("currency"):
                 errs.append("CURRENCY_MISSING")
@@ -201,8 +216,6 @@ class SelectionService:
             return self._fail(tech.id, ["PRICE_VALUE_MISSING"])
 
         # currency precedence:
-        # - fact currency
-        # - ctx currency (from po or other facts or policy default)
         currency = vj.get("currency") or ctx.get("currency")
 
         # method_required
@@ -240,7 +253,9 @@ class SelectionService:
         anchor_type = group.get("anchor_type")
         anchor_id = group.get("anchor_id")
 
-        evidences = self.evidence_repo.list_by_group(group_id)
+        # CRITICAL: evidences are owned by group_id (same as facts)
+        # Use group_id-only read to comply with contract and avoid case_id+group_id coupling.
+        evidences = self.evidence_repo.list_by_group_id(group_id)
 
         # CRITICAL: facts are OWNED by group_id only
         facts = self.fact_repo.list_by_group(group_id)
@@ -251,17 +266,15 @@ class SelectionService:
         if anchor_type == "PO_ITEM" and anchor_id:
             po_line = po_by_item_id.get(anchor_id)
 
-        # currency = (
-        #     (po_line or {}).get("unit_price", {}).get("currency")
-        #     or self._fact_currency(fact_map)
-        #     or currency_default
-        # )
+        # Currency resolution:
+        # - prefer PO snapshot currency if present
+        # - else facts currency
+        # - else policy default
         currency = (
             (po_line or {}).get("currency")
             or self._fact_currency(fact_map)
             or currency_default
         )
-
 
         return {
             "domain": domain_code,

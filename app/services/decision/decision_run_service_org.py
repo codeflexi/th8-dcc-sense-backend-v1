@@ -22,30 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone, date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
+from app.services.policy.calculation_requirements import required_calculations
+from app.services.decision.calculation_service import CalculationService
 
 import yaml
-
-# ---- Optional imports (do NOT break existing runtime if paths differ) ----
-try:
-    # preferred (as you referenced)
-    from app.services.policy.calculation_requirements import required_calculations  # type: ignore
-except Exception:
-    try:
-        # common location
-        from app.services.policy.calculation_requirements import required_calculations  # type: ignore
-    except Exception:
-        required_calculations = None  # type: ignore
-
-try:
-    from app.services.decision.calculation_service import CalculationService  # type: ignore
-except Exception:
-    try:
-        from app.services.decision.calculation_service import CalculationService  # type: ignore
-    except Exception:
-        CalculationService = None  # type: ignore
 
 try:
     from uuid import UUID
@@ -56,7 +39,7 @@ except Exception:
 SEVERITY_ORDER = {"LOW": 1, "MED": 2, "HIGH": 3, "CRITICAL": 4}
 
 
-class DecisionRunService:
+class DecisionRunServiceOrg:
     def __init__(
         self,
         *,
@@ -65,7 +48,6 @@ class DecisionRunService:
         group_repo,
         case_line_repo,
         doc_link_repo=None,  # optional; if provided, used for document_presence artifacts
-        audit_repo=None, 
         policy_path: str,
     ):
         self.run_repo = run_repo
@@ -73,7 +55,6 @@ class DecisionRunService:
         self.group_repo = group_repo
         self.case_line_repo = case_line_repo
         self.doc_link_repo = doc_link_repo
-        self.audit_repo = audit_repo
         self.policy = self._load_policy(policy_path)
 
     # =====================================================
@@ -88,11 +69,10 @@ class DecisionRunService:
         created_by: str = "SYSTEM",
     ) -> Dict[str, Any]:
         meta = self.policy.get("meta") or {}
-        # keep backward compatible keys
-        policy_id = str(meta.get("policy_name") or meta.get("policy_id") or "UNKNOWN_POLICY")
+        policy_id = str(meta.get("policy_name") or "UNKNOWN_POLICY")
         policy_version = str(meta.get("version") or "UNKNOWN_VERSION")
 
-        # determinism guard: hash case + policy + selection summary
+        # --- determinism guard: hash case + policy + selection summary ---
         input_hash = self._compute_input_hash(case_id, policy_id, policy_version, selection)
 
         inputs_snapshot = {
@@ -113,25 +93,6 @@ class DecisionRunService:
             inputs_snapshot=inputs_snapshot,
         )
         run_id = run["run_id"]
-        
-        # =====================================================
-        # AUDIT: Decision run started
-        # =====================================================
-        if self.audit_repo:
-            self.audit_repo.emit(
-                case_id=case_id,
-                event_type="DECISION_RUN_STARTED",
-                actor=created_by,
-                run_id=run_id,
-                payload={
-                    "run_id": run_id,
-                    "domain": domain_code,
-                    "policy_id": policy_id,
-                    "policy_version": policy_version,
-                    "input_hash": input_hash,
-                },
-            )
-        
 
         try:
             selection_by_group = self._index_selection_by_group(selection, case_id, domain_code)
@@ -140,6 +101,7 @@ class DecisionRunService:
             po_by_item_id = {str(l.get("item_id")): l for l in (po_lines or []) if l.get("item_id")}
 
             artifacts_present = self._detect_artifacts_present(case_id)
+
             groups = self.group_repo.list_by_case(case_id)
 
             group_results: List[Dict[str, Any]] = []
@@ -160,16 +122,14 @@ class DecisionRunService:
             agg = self._aggregate_case(group_results)
             summary = self._json_safe(agg["summary"])
 
-            risk_level = self._normalize_risk_level(agg["risk_level"])
-            
             self.run_repo.complete_run(
                 run_id=run_id,
                 decision=agg["decision"],
-                risk_level=risk_level,
+                risk_level=agg["risk_level"],
                 confidence=agg["confidence"],
                 summary=summary,
             )
-            
+
             response = {
                 "run_id": run_id,
                 "case_id": case_id,
@@ -179,19 +139,19 @@ class DecisionRunService:
                 "confidence": agg["confidence"],
                 "groups": group_results,
             }
-            
-            # =====================================================   
-            
-            
             return self._json_safe(response)
 
         except Exception as e:
+            # ensure error is always string
             self.run_repo.fail_run(run_id=run_id, error=str(e))
             raise
 
     # =====================================================
     # Group evaluation
     # =====================================================
+    
+    
+    
     def _evaluate_group(
         self,
         *,
@@ -204,48 +164,26 @@ class DecisionRunService:
         artifacts_present: set[str],
         created_by: str,
     ) -> Dict[str, Any]:
-
         group_id = str(group.get("group_id"))
         anchor_type = group.get("anchor_type")
         anchor_id = group.get("anchor_id")
+        
+      
 
-        # =====================================================
-        # AUDIT: Group evaluation started
-        # =====================================================
-        if self.audit_repo:
-            self.audit_repo.emit(
-                case_id=case_id,
-                event_type="GROUP_EVAL_STARTED",
-                actor="SYSTEM",
-                run_id=run_id,
-                payload={
-                    "run_id": run_id,
-                    "group_id": group_id,
-                    "anchor_type": anchor_type,
-                    "anchor_id": anchor_id,
-                },
-            )
-        
-        
-        
-        # =====================================================
-        # PO context
-        # =====================================================
+        # --- PO context ---
         po_line = None
         if anchor_type == "PO_ITEM" and anchor_id:
             po_line = po_by_item_id.get(str(anchor_id))
 
-        # =====================================================
-        # PO missing → deterministic REVIEW (KEEP AS-IS)
-        # =====================================================
+        # --- If PO line missing (deterministic REVIEW) ---
         if not po_line:
             decision_status = "REVIEW"
             risk_level = "HIGH"
             confidence = 0.20
 
-            trace = self._json_safe({
+            trace = {
                 "policy": {
-                    "policy_id": str((self.policy.get("meta") or {}).get("policy_id") or ""),
+                    "policy_id": str((self.policy.get("meta") or {}).get("policy_name") or ""),
                     "policy_version": str((self.policy.get("meta") or {}).get("version") or ""),
                 },
                 "inputs": {
@@ -256,17 +194,16 @@ class DecisionRunService:
                     "artifacts_present": sorted(list(artifacts_present)),
                 },
                 "selection": None,
-                "calculations": {},
                 "rules": [],
                 "notes": ["PO_LINE_MISSING_FOR_GROUP"],
-            })
-            
-         
+            }
+            trace = self._json_safe(trace)
+
             self.result_repo.upsert_result(
                 run_id=run_id,
                 group_id=group_id,
-                decision_status="REVIEW",
-                risk_level="HIGH",
+                decision_status=decision_status,
+                risk_level=risk_level,
                 confidence=confidence,
                 reason_codes=["PO_LINE_MISSING_FOR_GROUP"],
                 fail_actions=[{"type": "REVIEW"}],
@@ -277,136 +214,58 @@ class DecisionRunService:
 
             return {
                 "group_id": group_id,
-                "decision": "REVIEW",
-                "risk_level": "HIGH",
+                "decision": decision_status,
+                "risk_level": risk_level,
                 "confidence": confidence,
             }
 
-        # =====================================================
-        # Selection (C3.5)
-        # =====================================================
+        # --- C3.5 selection (source of truth) ---
         sel = selection_by_group.get(group_id)
         baseline_ctx = self._baseline_from_selection(sel)
         readiness = (sel or {}).get("readiness_flags") or {}
 
-
-        # =====================================================
-        # AUDIT: Baseline selected
-        # =====================================================
-        if self.audit_repo and baseline_ctx.get("baseline_available"):
-            self.audit_repo.emit(
-                case_id=case_id,
-                event_type="BASELINE_SELECTED",
-                actor="SYSTEM",
-                run_id=run_id,
-                payload={
-                    "run_id": run_id,
-                    "group_id": group_id,
-                    "baseline": baseline_ctx["baseline"],
-                    "baseline_source": baseline_ctx.get("baseline_source"),
-                    "technique": baseline_ctx.get("selected_technique"),
-                },
-            )
-
-
-        # =====================================================
-        # Calculations (KEEP BEHAVIOR)
-        # =====================================================
-        calculated = {}
-        calc_trace = []
-        calc_error = None
-
-        try:
-            if required_calculations and CalculationService:
-                calc_defs = required_calculations(self.policy, domain=domain_code)
-
-                meta = self.policy.get("meta") or {}
-                defaults = meta.get("defaults") or {}
-                rounding = defaults.get("rounding") or {}
-
-                calc_context = {
-                    "po": {
-                        "unit_price": self._normalize_money(
-                            po_line.get("unit_price"),
-                            fallback_currency=defaults.get("currency"),
-                        ),
-                    },
-                    "selection": {
-                        "baseline": baseline_ctx.get("baseline"),
-                    },
-                }
-
-                calc_engine = CalculationService()
-                calc_result = calc_engine.compute_all(
-                    calcs=calc_defs,
-                    ctx=calc_context,
-                    rounding=rounding,
-                )
-
-                calculated = self._json_safe(calc_result.values)
-                calc_trace = calc_result.trace
-
-        except Exception as e:
-            calc_error = str(e)
-            calculated = {}
-
-        # =====================================================
-        # Rule evaluation (KEEP)
-        # =====================================================
+        # --- Run rules ---
         rule_traces: List[Dict[str, Any]] = []
+        reason_codes: List[str] = []
         fail_actions: List[Dict[str, Any]] = []
+        max_severity: Optional[str] = None
 
-        for rule in self._iter_rules(domain_code):
+        for rule in self.policy.get("rules") or []:
+            
+            if (rule.get("domain") or "").strip() != domain_code:
+                continue
+
             rt = self._eval_rule(
                 rule=rule,
                 po_line=po_line,
                 baseline_ctx=baseline_ctx,
                 artifacts_present=artifacts_present,
                 readiness=readiness,
-                calculated=calculated,
             )
-            if rt:
-                rule_traces.append(rt)
-                if rt["result"] == "FAIL":
-                    fail_actions.extend(rt.get("fail_actions") or [])
+            if rt is None:
+                continue
 
-        # =====================================================
-        # ✅ FINAL Decision Aggregation (SINGLE SOURCE OF TRUTH)
-        # =====================================================
-        failed_rules = [
-            r for r in rule_traces
-            if r.get("result") == "FAIL"
-        ]
+            rule_traces.append(rt)
+            if rt["result"] == "FAIL":
+                reason_codes.append(rt["rule_id"])
+                fail_actions.extend(rt.get("fail_actions") or [])
+                max_severity = self._max_severity(max_severity, rt.get("severity"))
 
-        reason_codes = [
-            r["rule_id"]
-            for r in failed_rules
-            if r.get("rule_id")
-        ]
+        if not baseline_ctx.get("baseline_available"):
+            if "NO_BASELINE_AVAILABLE" not in reason_codes:
+                reason_codes.append("NO_BASELINE_AVAILABLE")
+            if max_severity is None:
+                max_severity = "MED"
+            fail_actions.append({"type": "REVIEW"})
 
-        max_severity = None
-        for r in failed_rules:
-            max_severity = self._max_severity(max_severity, r.get("severity"))
-
-        if not failed_rules:
-            decision_status = "PASS"
-            risk_level = "LOW"
-        else:
-            if max_severity == "CRITICAL":
-                decision_status = "REJECT"
-                risk_level = "CRITICAL"
-            else:
-                decision_status = "REVIEW"
-                risk_level = max_severity or "MED"
-
+        decision_status = self._aggregate_decision(max_severity, rule_traces)
         confidence = self._confidence(baseline_ctx, rule_traces)
 
-        # =====================================================
-        # Persist
-        # =====================================================
-        trace = self._json_safe({
+        selection_refs = self._refs_from_selection(sel)
+
+        trace = {
             "policy": {
-                "policy_id": str((self.policy.get("meta") or {}).get("policy_id") or ""),
+                "policy_id": str((self.policy.get("meta") or {}).get("policy_name") or ""),
                 "policy_version": str((self.policy.get("meta") or {}).get("version") or ""),
             },
             "inputs": {
@@ -421,72 +280,32 @@ class DecisionRunService:
                 "baseline": baseline_ctx.get("baseline"),
                 "baseline_source": baseline_ctx.get("baseline_source"),
                 "readiness_flags": readiness,
-                "selection_refs": self._refs_from_selection(sel),
-            },
-            "calculations": {
-                "values": calculated,
-                "trace": calc_trace,
-                "error": calc_error,
+                "selection_refs": selection_refs,
             },
             "rules": rule_traces,
-        })
+        }
+        trace = self._json_safe(trace)  # IMPORTANT: normal path must be JSON-safe too
 
         self.result_repo.upsert_result(
             run_id=run_id,
             group_id=group_id,
-            decision_status=decision_status,   # PASS / REVIEW / REJECT ONLY
-            risk_level=risk_level,
+            decision_status=decision_status,
+            risk_level=max_severity or "LOW",
             confidence=confidence,
             reason_codes=reason_codes,
             fail_actions=self._dedup_actions(fail_actions),
             trace=trace,
-            evidence_refs=self._json_safe(self._refs_from_selection(sel)),
+            evidence_refs=self._json_safe(selection_refs),
             created_by=created_by,
         )
-        
-        # =====================================================
-        # AUDIT: Group decision finalized
-        # =====================================================
-        if self.audit_repo:
-            self.audit_repo.emit(
-                case_id=case_id,
-                event_type="GROUP_DECISION_FINALIZED",
-                actor="SYSTEM",
-                run_id=run_id,
-                payload={
-                    "run_id": run_id,
-                    "group_id": group_id,
-                    "decision": decision_status,
-                    "risk_level": risk_level,
-                    "confidence": confidence,
-                    "reason_codes": reason_codes,
-                },
-            )
 
         return {
             "group_id": group_id,
             "decision": decision_status,
-            "risk_level": risk_level,
+            "risk_level": max_severity or "LOW",
             "confidence": confidence,
         }
 
-    @staticmethod
-    def _normalize_risk_level(risk_level: str) -> str:
-        m = (risk_level or "").upper().strip()
-        mapping = {
-            "LOW": "LOW",
-            "L": "LOW",
-
-            "MED": "MEDIUM",
-            "MID": "MEDIUM",
-            "M": "MEDIUM",
-            "MEDIUM": "MEDIUM",
-
-            "HIGH": "HIGH",
-            "H": "HIGH",
-        }
-        return mapping.get(m, m)
-    
     # =====================================================
     # Rule Evaluation (Policy YAML)
     # =====================================================
@@ -498,7 +317,6 @@ class DecisionRunService:
         baseline_ctx: Dict[str, Any],
         artifacts_present: set[str],
         readiness: Dict[str, Any],
-        calculated: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         if not self._preconditions_ok(rule.get("preconditions") or {}, baseline_ctx, artifacts_present, readiness):
             return None
@@ -506,47 +324,12 @@ class DecisionRunService:
         logic = rule.get("logic") or {}
         logic_type = logic.get("type")
 
-        po_price = self._dec(self._extract_money_value(po_line.get("unit_price"), fallback=po_line.get("unit_price")))
+        po_price = self._dec(po_line.get("unit_price"))
+
         baseline = baseline_ctx.get("baseline")
         baseline_price = self._dec((baseline or {}).get("value"))
 
-        # -------------------------------------------------
-        # Enterprise v1: compare (uses calculated fields)
-        # -------------------------------------------------
-        if logic_type == "compare":
-            field = str(logic.get("field") or "")
-            op = str(logic.get("operator") or "").strip()
-            expected = logic.get("value")
-
-            actual = calculated.get(field)
-
-            # deterministic if missing required calculated value
-            if actual is None:
-                return self._trace(
-                    rule,
-                    "FAIL",
-                    {"note": f"missing calculated field: {field}"},
-                    self._normalize_fail_actions(rule.get("fail_actions") or [{"type": "REVIEW"}]),
-                    {"missing_field": field},
-                )
-
-            is_fail = self._compare(actual, op, expected)
-            calculation = {
-                "field": field,
-                "actual": actual,
-                "operator": op,
-                "expected": expected,
-            }
-            return self._trace(
-                rule,
-                "FAIL" if is_fail else "PASS",
-                calculation,
-                self._normalize_fail_actions(rule.get("fail_actions") or []) if is_fail else [],
-)
-
-        # -------------------------------------------------
-        # Legacy: variance_pct (works without calc layer)
-        # -------------------------------------------------
+        # variance_pct
         if logic_type == "variance_pct":
             if po_price is None or baseline_price is None or baseline_price == 0:
                 return self._trace(rule, "FAIL", {"note": "missing inputs for variance_pct"}, [{"type": "REVIEW"}])
@@ -569,9 +352,7 @@ class DecisionRunService:
                 {},
             )
 
-        # -------------------------------------------------
-        # Legacy: greater_than
-        # -------------------------------------------------
+        # greater_than (contract breach)
         if logic_type == "greater_than":
             if po_price is None or baseline_price is None:
                 return self._trace(rule, "FAIL", {"note": "missing inputs for greater_than"}, [{"type": "REVIEW"}])
@@ -590,9 +371,7 @@ class DecisionRunService:
                 {},
             )
 
-        # -------------------------------------------------
         # document_presence
-        # -------------------------------------------------
         if logic_type == "document_presence":
             required_docs = [str(x).upper() for x in (logic.get("required_docs") or [])]
             has_any_doc = ("DOCUMENT" in artifacts_present)
@@ -612,9 +391,7 @@ class DecisionRunService:
                 extra,
             )
 
-        # -------------------------------------------------
-        # placeholders
-        # -------------------------------------------------
+        # Finance/AP placeholders
         if logic_type in ("three_way_match", "two_way_match", "duplicate_pattern"):
             calculation = {"note": "MVP placeholder – insufficient artifacts/data"}
             return self._trace(
@@ -741,20 +518,20 @@ class DecisionRunService:
     def _aggregate_decision(self, max_severity: Optional[str], rule_traces: List[Dict[str, Any]]) -> str:
         failed = [r for r in (rule_traces or []) if r.get("result") == "FAIL"]
         if not failed:
-            return "PASS"
+            return "APPROVE"
 
         if max_severity in ("HIGH", "CRITICAL"):
             return "REVIEW"
         if max_severity == "MED":
             return "REVIEW"
-        return "PASS"
+        return "APPROVE"
 
     def _aggregate_case(self, group_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         worst = None
         for g in group_results or []:
             worst = self._max_severity(worst, g.get("risk_level"))
 
-        decision = "PASS"
+        decision = "APPROVE"
         if any((g.get("decision") == "REVIEW") for g in (group_results or [])):
             decision = "REVIEW"
 
@@ -815,38 +592,6 @@ class DecisionRunService:
         return out
 
     # =====================================================
-    # Policy shape helpers (DO NOT break old policy)
-    # =====================================================
-    def _iter_rules(self, domain_code: str) -> List[Dict[str, Any]]:
-        """
-        Supports BOTH:
-          - legacy: policy["rules"] with rule["domain"]
-          - enterprise v1: policy["domains"][domain]["rules"] with no rule.domain
-        """
-        # enterprise v1 shape
-        domains = self.policy.get("domains") or {}
-        d = domains.get(domain_code)
-        if isinstance(d, dict) and isinstance(d.get("rules"), list):
-            out = []
-            for r in d.get("rules") or []:
-                if isinstance(r, dict):
-                    rr = dict(r)
-                    # ensure domain exists for trace consistency
-                    rr.setdefault("domain", domain_code)
-                    out.append(rr)
-            return out
-
-        # legacy shape
-        out = []
-        for r in self.policy.get("rules") or []:
-            if not isinstance(r, dict):
-                continue
-            if (r.get("domain") or "").strip() != domain_code:
-                continue
-            out.append(r)
-        return out
-
-    # =====================================================
     # Generic helpers
     # =====================================================
     def _compute_input_hash(self, case_id: str, policy_id: str, policy_version: str, selection: Dict[str, Any]) -> str:
@@ -856,10 +601,12 @@ class DecisionRunService:
             "policy_version": policy_version,
             "selection_summary": self._selection_summary(selection),
         }
+        # IMPORTANT: do not crash on datetime/Decimal/UUID
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _safe_po(self, po_line: Dict[str, Any]) -> Dict[str, Any]:
+        # do not coerce types here; rely on _json_safe(trace) before persist
         return {
             "item_id": po_line.get("item_id"),
             "sku": po_line.get("sku"),
@@ -870,6 +617,7 @@ class DecisionRunService:
             "total_price": po_line.get("total_price"),
             "uom": po_line.get("uom"),
             "source_line_ref": po_line.get("source_line_ref"),
+            # if your DB row includes created_at, it will be handled by _json_safe(trace)
             "created_at": po_line.get("created_at"),
         }
 
@@ -910,6 +658,9 @@ class DecisionRunService:
         seen = set()
         out = []
         for a in actions or []:
+            import pprint
+            pprint.pprint(a)
+            # IMPORTANT: do not crash on datetime/Decimal/UUID inside actions
             safe = self._json_safe(a)
             s = json.dumps(safe, sort_keys=True, ensure_ascii=False, default=str)
             if s in seen:
@@ -929,65 +680,29 @@ class DecisionRunService:
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    # =====================================================
-    # Value extraction / compare helpers (enterprise grade)
-    # =====================================================
-    def _compare(self, actual: Any, operator: str, expected: Any) -> bool:
-        op = operator.strip()
-        if op in (">", ">=", "<", "<="):
-            a = self._dec(actual)
-            e = self._dec(expected)
-            if a is None or e is None:
-                return False
-            if op == ">":
-                return a > e
-            if op == ">=":
-                return a >= e
-            if op == "<":
-                return a < e
-            if op == "<=":
-                return a <= e
-        if op in ("==", "!="):
-            if op == "==":
-                return actual == expected
-            return actual != expected
-        # unknown operator => deterministic FAIL
-        return False
-
-    def _extract_money_value(self, v: Any, fallback: Any = None) -> Any:
-        """
-        Supports unit_price stored as:
-          - number
-          - {"value": number, "currency": "THB"}
-        """
-        if isinstance(v, dict) and "value" in v:
-            return v.get("value")
-        return v if v is not None else fallback
-
-    def _normalize_money(self, v: Any, fallback_currency: Optional[str] = None) -> Dict[str, Any]:
-        if isinstance(v, dict) and "value" in v:
-            return {"value": v.get("value"), "currency": v.get("currency") or fallback_currency}
-        if v is None:
-            return {"value": None, "currency": fallback_currency}
-        return {"value": v, "currency": fallback_currency}
-
     def _json_safe(self, v: Any) -> Any:
+        # datetime / date
         if isinstance(v, datetime):
             return v.isoformat()
         if isinstance(v, date):
             return v.isoformat()
 
+        # Decimal
         if isinstance(v, Decimal):
+            # keep deterministic; string preserves exactness
             return str(v)
 
+        # UUID
         if UUID is not None and isinstance(v, UUID):
             return str(v)
 
+        # set / tuple
         if isinstance(v, set):
             return [self._json_safe(x) for x in sorted(list(v), key=lambda z: str(z))]
         if isinstance(v, tuple):
             return [self._json_safe(x) for x in v]
 
+        # dict / list
         if isinstance(v, dict):
             return {str(k): self._json_safe(x) for k, x in v.items()}
         if isinstance(v, list):

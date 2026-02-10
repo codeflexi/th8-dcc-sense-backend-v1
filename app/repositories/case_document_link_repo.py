@@ -1,9 +1,14 @@
 from app.repositories.base import BaseRepository
-from datetime import datetime
+from datetime import datetime , timezone
 
 class CaseDocumentLinkRepository(BaseRepository):
     TABLE = "dcc_case_document_links"
-    
+     # =====================================================
+    # Constructor
+    # =====================================================
+    def __init__(self, sb):
+        super().__init__(sb)
+
     def get(self, link_id: str) -> dict | None:
         res = (
             self.sb.table(self.TABLE)
@@ -98,7 +103,7 @@ class CaseDocumentLinkRepository(BaseRepository):
             .update({
                 "link_status": "CONFIRMED",
                 "confirmed_by": actor_id,
-                "confirmed_at": datetime.utcnow().isoformat()
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("link_id", link_id)
             .eq("link_status", "INFERRED")
@@ -115,7 +120,7 @@ class CaseDocumentLinkRepository(BaseRepository):
             .update({
                 "link_status": "REMOVED",
                 "confirmed_by": actor_id,
-                "confirmed_at": datetime.utcnow().isoformat()
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("link_id", link_id)
             .eq("link_status", "INFERRED")
@@ -126,7 +131,7 @@ class CaseDocumentLinkRepository(BaseRepository):
     def list_confirmed(self, case_id: str):
         return (
             self.sb
-            .table("dcc_case_document_links")
+            .table(self.TABLE)
             .select("*")
             .eq("case_id", case_id)
             .eq("link_status", "CONFIRMED")

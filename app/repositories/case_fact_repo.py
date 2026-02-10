@@ -14,6 +14,13 @@ class CaseFactRepository(BaseRepository):
     """
 
     TABLE = "dcc_case_facts"
+    
+    # =====================================================
+    # Constructor (REQUIRED)
+    # =====================================================
+    def __init__(self, sb):
+        super().__init__(sb)
+
 
     # =====================================================
     # WRITE

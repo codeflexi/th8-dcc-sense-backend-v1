@@ -16,7 +16,7 @@ class EmbeddingService:
         model=MODEL,
         api_key=settings.OPENAI_API_KEY,
     )
-
+    # ใช้ตัวนี้ ทังหมดจะเรียกผ่าน EmbeddingService.embed() ซึ่งจะมีการตรวจสอบความถูกต้องของ input และ output ก่อนเรียก LangChain API จริงๆ
     @classmethod
     def embed(cls, text: str) -> List[float]:
         if not text or not text.strip():

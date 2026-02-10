@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Query , Path, status
+from fastapi import APIRouter, Depends, HTTPException, Query , Path, status , Request
 from typing import Dict, Any
 
-from app.infra.supabase_client import get_supabase
+
 from app.services.decision.selection_service import SelectionService
 
 from app.services.decision.decision_run_service import DecisionRunService
@@ -12,6 +12,7 @@ from app.repositories.case_decision_result_repo import CaseDecisionResultReposit
 from app.repositories.case_evidence_group_repo import CaseEvidenceGroupRepository
 from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
+from app.repositories.audit_repo import AuditRepository
 
 router = APIRouter(
 )
@@ -19,12 +20,13 @@ router = APIRouter(
 
 @router.post("/{case_id}/selection")
 def run_selection_for_case(
+    request: Request,
     case_id: str,
     domain: str = Query(
         ...,
         description="Decision domain (e.g. procurement, finance_ap)"
     ),
-    sb = Depends(get_supabase),
+    
 ) -> Dict[str, Any]:
     """
     C.3.5 Technical Selection (Preview)
@@ -33,8 +35,8 @@ def run_selection_for_case(
     - NO decision logic
     - NO persistence
     """
-
-    service = SelectionService()
+    sb = request.state.sb
+    service = SelectionService(sb = sb)
 
     try:
         result = service.select_for_case(
@@ -79,9 +81,9 @@ Flow:
 """
 )
 def run_decision_for_case(
+    request: Request,
     case_id: str = Path(..., description="Case ID"),
-    domain_code: str = "procurement",
-    sb=Depends(get_supabase),
+    domain_code: str = "procurement"
 ) -> Dict[str, Any]:
     """
     Orchestration layer only:
@@ -89,23 +91,23 @@ def run_decision_for_case(
     - run C3.5 selection
     - run C4 decision
     """
-
+    sb = request.state.sb
     try:
         # =================================================
         # Compose repositories
         # =================================================
-        run_repo = DecisionRunRepository()
-        result_repo = CaseDecisionResultRepository()
-        group_repo = CaseEvidenceGroupRepository()
-        case_line_repo = CaseLineItemRepository()
-        doc_link_repo = CaseDocumentLinkRepository()
+        run_repo = DecisionRunRepository(sb)
+        result_repo = CaseDecisionResultRepository(sb)
+        group_repo = CaseEvidenceGroupRepository(sb)
+        case_line_repo = CaseLineItemRepository(sb)
+        doc_link_repo = CaseDocumentLinkRepository(sb)
+        audit_repo = AuditRepository(sb)  # TODO
 
         # =================================================
         # Step 1: Technical Selection (C3.5)
         # =================================================
-        selection_service = SelectionService(
-           
-        )
+        selection_service = SelectionService(sb = sb)
+        
 
         selection = selection_service.select_for_case(
             case_id=case_id,
@@ -121,7 +123,8 @@ def run_decision_for_case(
             group_repo=group_repo,
             case_line_repo=case_line_repo,
             doc_link_repo=doc_link_repo,
-            policy_path="app/policies/sense_policy_mvp.yaml",
+            audit_repo =audit_repo,
+            policy_path="app/policies/sense_policy_mvp_v1.yaml",
         )
 
         result = decision_service.run_case(

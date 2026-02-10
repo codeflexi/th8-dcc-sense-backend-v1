@@ -15,8 +15,8 @@ class DecisionRunRepository(BaseRepository):
 
     TABLE = "dcc_decision_runs"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, sb):
+        super().__init__(sb)
 
     def _encode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure supabase client never sees datetime/Decimal/UUID objects
@@ -81,3 +81,19 @@ class DecisionRunRepository(BaseRepository):
         payload = self._encode(payload)
 
         self.sb.table(self.TABLE).update(payload).eq("run_id", run_id).execute()
+
+    # -------------------------------------------------
+    # Read
+    # -------------------------------------------------
+    def get_latest_completed_by_case(self, case_id: str) -> dict | None:
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .select("*")
+            .eq("case_id", case_id)
+            .eq("run_status", "COMPLETED")
+            .order("completed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None

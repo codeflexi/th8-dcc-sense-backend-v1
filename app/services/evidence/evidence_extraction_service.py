@@ -7,27 +7,60 @@ from app.repositories.case_line_item_repo import CaseLineItemRepository   # ✅ 
 
 
 class EvidenceExtractionService:
+    """
+    C3 — Evidence Extraction (LOCKED)
 
-    @staticmethod
-    def extract(case_id: str, actor_id: str = "SYSTEM"):
-        link_repo = CaseDocumentLinkRepository()
-        price_repo = PriceItemRepository()
-        clause_repo = ClauseRepository()
-        evidence_repo = CaseEvidenceRepository()
-        doc_repo = DocumentRepository()
-        line_repo = CaseLineItemRepository()   # ✅ ADD
+    PURPOSE:
+    - Extract atomic evidences from confirmed documents
+    - Attach PRICE evidences to PO_ITEM anchor
+    - CLAUSE evidences are unanchored (grouping later)
 
+    ENTERPRISE CONSTRAINT (ADDED):
+    - Repositories MUST be constructed with sb
+    - No Repo() without sb
+    """
+
+    # ------------------------------------------------------------------
+    # CHANGED:
+    #   from @staticmethod → instance method with sb
+    #
+    # WHY:
+    # - staticmethod prevents dependency injection
+    # - causes Repo() without sb → inconsistent Supabase client
+    # - breaks determinism across services
+    # ------------------------------------------------------------------
+    def __init__(self, *, sb):
+        self.sb = sb
+
+        # CHANGED: inject sb into repositories
+        # WHY: enforce single Supabase client lifecycle per request
+        self.link_repo = CaseDocumentLinkRepository(sb)
+        self.price_repo = PriceItemRepository(sb)
+        self.clause_repo = ClauseRepository(sb)
+        self.evidence_repo = CaseEvidenceRepository(sb)
+        self.doc_repo = DocumentRepository(sb)
+        self.line_repo = CaseLineItemRepository(sb)   # ✅ ADD (authoritative PO index)
+
+    # ------------------------------------------------------------------
+    # CHANGED:
+    #   remove @staticmethod
+    #
+    # WHY:
+    # - needs access to injected repositories
+    # - preserves deterministic behavior
+    # ------------------------------------------------------------------
+    def extract(self, case_id: str, actor_id: str = "SYSTEM"):
         # -------------------------
         # Build PO index (authoritative)
         # -------------------------
-        po_lines = line_repo.list_by_case(case_id)
+        po_lines = self.line_repo.list_by_case(case_id)
         sku_to_item_id = {
             li.get("sku"): li.get("item_id")
             for li in po_lines
             if li.get("sku") and li.get("item_id")
         }
 
-        confirmed_links = link_repo.list_confirmed(case_id)
+        confirmed_links = self.link_repo.list_confirmed(case_id)
 
         if not confirmed_links:
             return {
@@ -41,7 +74,7 @@ class EvidenceExtractionService:
         for link in confirmed_links:
             document_id = link["document_id"]
 
-            document = doc_repo.get(document_id)
+            document = self.doc_repo.get(document_id)
             if not document:
                 continue
 
@@ -50,22 +83,25 @@ class EvidenceExtractionService:
             # =========================
             # PRICE EVIDENCE (ANCHOR REQUIRED)
             # =========================
-            for item in price_repo.list_by_document(document_id):
+            for item in self.price_repo.list_by_document(document_id):
                 sku = item.get("sku")
                 item_id = sku_to_item_id.get(sku)
 
                 if not item_id:
-                    # 🔒 strict: do not guess
+                    # 🔒 strict: do not guess anchor
+                    # WHY:
+                    # - anchor contract = PO_ITEM only
+                    # - guessing breaks audit + determinism
                     continue
 
-                evidence_repo.insert({
+                self.evidence_repo.insert({
                     "case_id": case_id,
                     "document_id": document_id,
                     "evidence_type": "PRICE",
                     "extraction_method": "STRUCTURED_TABLE",
                     "source": source,
 
-                    # ✅ ANCHOR (THIS IS THE FIX)
+                    # ✅ ANCHOR (LOCKED CONTRACT)
                     "anchor_type": "PO_ITEM",
                     "anchor_id": item_id,
 
@@ -75,9 +111,9 @@ class EvidenceExtractionService:
                         "currency": item.get("currency"),
                         "uom": item.get("uom")
                     },
-                    "source_snippet": item.get("raw_text"),
-                    "source_page": item.get("page_no"),
-                    "confidence": 1.0,
+                    "source_snippet": item.get("snippet"),
+                    "source_page": item.get("page_number"),
+                    "confidence": item.get("confidence_score", 0.0),
                     "created_by": actor_id
                 })
                 evidence_count += 1
@@ -85,20 +121,25 @@ class EvidenceExtractionService:
             # =========================
             # CLAUSE EVIDENCE (NO ANCHOR)
             # =========================
-            for clause in clause_repo.list_by_document(document_id):
-                evidence_repo.insert({
+            for clause in self.clause_repo.list_by_document(document_id):
+                self.evidence_repo.insert({
                     "case_id": case_id,
                     "document_id": document_id,
                     "evidence_type": "CLAUSE",
                     "extraction_method": "CLAUSE_PARSE",
                     "source": source,
+
+                    # NOTE:
+                    # - no anchor_type / anchor_id
+                    # - grouping handled later (C3+)
                     "evidence_payload": {
                         "clause_id": clause.get("clause_id"),
-                        "title": clause.get("title")
+                        "type": clause.get("clause_type"),
+                        "title": clause.get("clause_title")
                     },
-                    "source_snippet": clause.get("text"),
-                    "source_page": clause.get("page_no"),
-                    "confidence": 1.0,
+                    "source_snippet": clause.get("clause_text"),
+                    "source_page": clause.get("page_number"),
+                    "confidence": clause.get("confidence_score", 1.0),
                     "created_by": actor_id
                 })
                 evidence_count += 1
