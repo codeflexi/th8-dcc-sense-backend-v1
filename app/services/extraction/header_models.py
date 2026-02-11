@@ -1,24 +1,37 @@
 from __future__ import annotations
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from pydantic import BaseModel
 
-
-# ---------- Document Header ----------
 
 class DocumentHeader(BaseModel):
-    document_type: Optional[str] = Field(
-        default=None, description="CONTRACT | INVOICE | SLA | OTHER"
-    )
-    title: Optional[str] = None
+    doc_type: Optional[str] = None
+    doc_title: Optional[str] = None
+    doc_number: Optional[str] = None
     language: Optional[str] = None
-    issuer_name: Optional[str] = None
-    effective_from: Optional[str] = Field(
-        default=None, description="ISO date string if explicitly stated"
-    )
-    effective_to: Optional[str] = Field(
-        default=None, description="ISO date string if explicitly stated"
-    )
 
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+
+    # IMPORTANT: must be dict not list
+    parties: Optional[Dict[str, Any]] = None
+
+    # for downstream decision engine
+    extracted_fields: Optional[Dict[str, Any]] = None
+
+
+# class DocumentHeader(BaseModel):
+#     document_type: Optional[str] = None
+#     title: Optional[str] = None
+#     document_number: Optional[str] = None
+#     language: Optional[str] = None
+
+#     issuer_name: Optional[str] = None
+#     counterparty_name: Optional[str] = None
+
+#     effective_from: Optional[str] = None
+#     effective_to: Optional[str] = None
+
+#     extracted_fields: Optional[Dict[str, Any]] = None
 
 # ---------- Contract Header ----------
 

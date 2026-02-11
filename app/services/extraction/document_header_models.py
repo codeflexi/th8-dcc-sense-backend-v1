@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import date
 
 
@@ -20,7 +20,10 @@ class DocumentHeader(BaseModel):
     effective_from: Optional[date] = None
     effective_to: Optional[date] = None
 
-    parties: Optional[List[Dict[str, Any]]] = None
+    # 🔴 FIX: must be dict, not list
+    parties: Optional[Dict[str, Any]] = None
+
+    # downstream decision engine
     extracted_fields: Dict[str, Any] = Field(default_factory=dict)
 
     extraction_method: str = "LLM_HEADER"

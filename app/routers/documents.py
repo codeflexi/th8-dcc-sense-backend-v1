@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException,Request
 from app.repositories.document_repo import DocumentRepository
 from app.repositories.document_open_repo import DocumentOpenRepository
+from app.services.document.document_service import DocumentPageService
+from typing import Optional, Dict, Any
 
 
 router = APIRouter()
@@ -61,3 +63,41 @@ def get_document_page(request: Request, document_id: str, page_no: int):
         return doc_repo.get_page(document_id, page_no)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    
+# =========================================================
+# NEW: FULL PAGE CONTEXT (HEADER + CHUNKS + PRICE + EVIDENCE)
+# =========================================================
+@router.get("/documents/{document_id}/page-context/{page_no}")
+def get_document_page_context(
+    request: Request,
+    document_id: str,
+    page_no: int,
+    case_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+):
+    """
+    Enterprise page context endpoint
+
+    Used by:
+    - Evidence modal
+    - Copilot context builder
+    - PDF viewer right panel
+    """
+
+    sb = request.state.sb
+    service = DocumentPageService(sb)
+
+    try:
+        data = service.get_page(
+            document_id=document_id,
+            page_number=page_no,
+            case_id=case_id,
+            group_id=group_id,
+        )
+        return data
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

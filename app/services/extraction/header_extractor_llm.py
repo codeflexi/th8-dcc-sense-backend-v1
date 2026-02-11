@@ -20,13 +20,10 @@ class HeaderExtractionResult(BaseModel):
 
 class HeaderExtractor:
     """
-    LLM-first, conservative header extractor.
-
-    Principles:
-    - Extract ONLY what is explicitly stated
-    - Fail-closed to null
-    - No inference / no guessing
-    - Output matches DB schema directly
+    Enterprise-safe header extractor
+    - schema aligned with DB
+    - always produces extracted_fields
+    - deterministic fallback if LLM doesn't send
     """
 
     def __init__(self):
@@ -49,7 +46,7 @@ class HeaderExtractor:
         )
 
     # ------------------------------------------------------------------
-    # Public API
+    # PUBLIC
     # ------------------------------------------------------------------
 
     def extract_document_header(
@@ -61,6 +58,9 @@ class HeaderExtractor:
             raw: DocumentHeader = self.doc_llm.invoke(
                 self._document_prompt(text)
             )
+            print("RAW LLM HEADER =", raw)
+            print("RAW extracted_fields =", raw.extracted_fields)
+
         except Exception as e:
             return HeaderExtractionResult(
                 header={},
@@ -103,7 +103,7 @@ class HeaderExtractor:
         )
 
     # ------------------------------------------------------------------
-    # Prompt builders
+    # PROMPT
     # ------------------------------------------------------------------
 
     def _build_prompt_text(self, pages: List[Dict[str, Any]]) -> str:
@@ -116,60 +116,105 @@ class HeaderExtractor:
 
     def _document_prompt(self, text: str) -> str:
         return (
-            "You are extracting DOCUMENT HEADER information.\n"
-            "Rules:\n"
-            "- Extract ONLY what is explicitly stated.\n"
-            "- If uncertain, return null.\n"
-            "- Do NOT infer dates, parties, or numbers.\n"
-            "- doc_type must be one of: CONTRACT, INVOICE, SLA, AMENDMENT, OTHER.\n\n"
+            "Extract DOCUMENT HEADER.\n"
+            "Only explicit values.\n"
+            "Return null if not found.\n\n"
+            "Return JSON with fields:\n"
+            "- doc_type\n"
+            "- doc_title\n"
+            "- doc_number\n"
+            "- language\n"
+            "- effective_from\n"
+            "- effective_to\n"
+            "- parties (buyer/vendor if explicitly written)\n"
+            "- extracted_fields (ALL explicit fields found)\n\n"
+            "extracted_fields must include any explicit:\n"
+            "- contract number\n"
+            "- vendor\n"
+            "- buyer\n"
+            "- reference numbers\n"
+            "- currency\n"
+            "- other key header values\n\n"
+            "If none found → return empty object {}\n\n"
             "Text:\n"
             + text
         )
 
     def _contract_prompt(self, text: str) -> str:
         return (
-            "You are extracting CONTRACT HEADER information.\n"
-            "Rules:\n"
-            "- Extract ONLY what is explicitly stated.\n"
-            "- If uncertain, return null.\n"
-            "- Do NOT infer vendor, buyer, or dates.\n\n"
+            "Extract CONTRACT HEADER.\n"
+            "Only explicit values.\n"
+            "Return null if not found.\n\n"
             "Text:\n"
             + text
         )
 
     # ------------------------------------------------------------------
-    # Normalization (DB-schema aligned)
+    # NORMALIZE
     # ------------------------------------------------------------------
 
     def _normalize_document_header(
         self, h: DocumentHeader
     ) -> tuple[Dict[str, Any], float]:
+
         score = 0.7
 
-        doc_type = (h.doc_type or "OTHER").upper()
+        doc_type = (getattr(h, "doc_type", None) or "OTHER").upper()
         if doc_type not in _ALLOWED_DOC_TYPES:
             doc_type = "OTHER"
 
+        doc_title = getattr(h, "doc_title", None)
+        doc_number = getattr(h, "doc_number", None)
+        language = getattr(h, "language", None)
+        eff_from = getattr(h, "effective_from", None)
+        eff_to = getattr(h, "effective_to", None)
+        parties = getattr(h, "parties", None)
+
+        extracted = getattr(h, "extracted_fields", None) or {}
+        
+        print("RAW HEADER:", h)
+        print("EXTRACTED:", getattr(h,"extracted_fields",None))
+
+
+        # -------- deterministic fallback --------
+        if not extracted:
+            extracted = {}
+
+            if doc_number:
+                extracted["document_number"] = doc_number
+
+            if doc_title:
+                extracted["document_title"] = doc_title
+
+            if eff_from:
+                extracted["effective_from"] = eff_from
+
+            if eff_to:
+                extracted["effective_to"] = eff_to
+
+            if parties:
+                extracted["parties"] = parties
+
         header: Dict[str, Any] = {
             "doc_type": doc_type,
-            "doc_title": h.doc_title,
-            "doc_number": h.doc_number,
-            "language": h.language,
-            "effective_from": h.effective_from,
-            "effective_to": h.effective_to,
-            "parties": h.parties,
-            "extracted_fields": h.extracted_fields or {},
+            "doc_title": doc_title,
+            "doc_number": doc_number,
+            "language": language,
+            "effective_from": eff_from,
+            "effective_to": eff_to,
+            "parties": parties,
+            "extracted_fields": extracted,
         }
 
-        if h.doc_title:
+        if doc_title:
             score += 0.05
-        if h.doc_number:
+        if doc_number:
             score += 0.05
-        if h.effective_from:
+        if eff_from:
             score += 0.05
-        if h.effective_to:
+        if eff_to:
             score += 0.05
-        if h.parties:
+        if parties:
             score += 0.05
 
         return header, round(min(score, 0.95), 3)
@@ -177,27 +222,27 @@ class HeaderExtractor:
     def _normalize_contract_header(
         self, h: ContractHeader
     ) -> tuple[Dict[str, Any], float]:
+
         score = 0.7
 
         header: Dict[str, Any] = {
-            "contract_code": h.contract_code,
-            "vendor_name": h.vendor_name,
-            "buyer_name": h.buyer_name,
-            "effective_from": h.effective_from,
-            "effective_to": h.effective_to,
-            "status": h.status,
-            "metadata": h.metadata or {},
+            "contract_code": getattr(h, "contract_code", None),
+            "vendor_name": getattr(h, "vendor_name", None),
+            "buyer_name": getattr(h, "buyer_name", None),
+            "effective_from": getattr(h, "validity_start", None),
+            "effective_to": getattr(h, "validity_end", None),
+            "metadata": {},
         }
 
-        if h.contract_code:
+        if header["contract_code"]:
             score += 0.05
-        if h.vendor_name:
+        if header["vendor_name"]:
             score += 0.05
-        if h.buyer_name:
+        if header["buyer_name"]:
             score += 0.05
-        if h.effective_from:
+        if header["effective_from"]:
             score += 0.05
-        if h.effective_to:
+        if header["effective_to"]:
             score += 0.05
 
         return header, round(min(score, 0.95), 3)

@@ -15,7 +15,7 @@ router = APIRouter()
 async def ingest_document(
     request: Request,
     entity_id: str,
-    entity_type: str,
+   
     contract_id: str | None = None,
     process_inline: bool = False,
     file: UploadFile = File(...),
@@ -40,7 +40,7 @@ async def ingest_document(
 
     doc = docs.upsert_by_hash(
         entity_id=entity_id,
-        entity_type=entity_type,
+      
         contract_id=contract_id,
         file_hash=file_hash,
         filename=file.filename or "uploaded.pdf",
@@ -56,7 +56,7 @@ async def ingest_document(
         event_type="DOC_REGISTERED",
         payload={
             "entity_id": entity_id,
-            "entity_type": entity_type,
+            
             "contract_id": contract_id,
             "filename": file.filename,
             "file_hash": file_hash,
@@ -81,7 +81,7 @@ async def ingest_document(
     ctr, warnings = await pipeline.run(
         job=job,
         entity_id=entity_id,
-        entity_type=entity_type,
+        
         contract_id=contract_id,
         filename=file.filename or "uploaded.pdf",
         content_type=file.content_type or "application/pdf",

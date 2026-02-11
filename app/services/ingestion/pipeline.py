@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import datetime
 
 from app.repositories.storage_repo import StorageRepository
 from app.repositories.document_repo import DocumentRepository
@@ -24,6 +25,40 @@ from app.services.semantic.semantic_extractor import SemanticExtractor
 from app.services.semantic.semantic_validator import SemanticValidator
 from app.services.semantic.semantic_to_header_mapper import SemanticToHeaderMapper
 from app.services.embedding.embedding_service import EmbeddingService
+
+
+
+from app.services.ingestion.supersession_resolver import SupersessionResolver 
+from app.services.ingestion.document_meta_rules import (
+    normalize_doc_type,
+    infer_document_role,
+    build_signal_flags,
+    build_classification_trace,
+    build_extraction_summary,
+)
+from app.services.extraction.extracted_fields_validator import validate_extracted_fields
+
+
+from typing import Any
+
+def _json_safe(obj: Any) -> Any:
+    """
+    Recursively convert non-JSON-serializable objects (date/datetime)
+    into ISO-8601 strings.
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+
+    return obj
 
 
 @dataclass
@@ -72,6 +107,11 @@ class IngestionPipeline:
         self.semantic_extractor = SemanticExtractor()
         self.semantic_validator = SemanticValidator()
         self.semantic_mapper = SemanticToHeaderMapper()
+        
+           # -------------------------------------------------
+        # New (enterprise doc governance)
+        # -------------------------------------------------
+        self.supersession = SupersessionResolver(self.docs)
 
     # -------------------------------------------------
     # Helpers
@@ -84,6 +124,9 @@ class IngestionPipeline:
                 out[k] = v
         return out
 
+
+  
+
     # -------------------------------------------------
     # Main pipeline
     # -------------------------------------------------
@@ -92,7 +135,7 @@ class IngestionPipeline:
         *,
         job: dict,
         entity_id: str,
-        entity_type: str,
+       
         contract_id: str | None,
         filename: str,
         content_type: str,
@@ -183,7 +226,222 @@ class IngestionPipeline:
             event_type="PAGES_WRITTEN",
             payload={"count": counters.pages_written},
         )
+        
+       
+       
+        # =================================================
+        # STEP 2.5: Header extraction + deterministic enrich + meta update
+        # =================================================
 
+        header = {}
+        doc_type = "OTHER"
+        doc_role = None
+        eff_from = None
+        eff_to = None
+
+        self.events.append(
+            job_id=job_id,
+            document_id=document_id,
+            event_type="DOC_HEADER_EXTRACT_STARTED",
+            payload={},
+        )
+
+        try:
+            # 1️⃣ LLM extract
+            hdr_res = self.document_header_extractor.extract_document_header(pages)
+            warnings.extend(hdr_res.warnings or [])
+            header = hdr_res.header or {}
+
+            # 2️⃣ Deterministic enrich
+            header = self.enricher.enrich(pages=pages, header=header)
+
+            # 3️⃣ Normalize
+            doc_type = normalize_doc_type(header.get("doc_type"))
+            doc_role = infer_document_role(doc_type, contract_id)
+
+            eff_from = header.get("effective_from")  # date or None
+            eff_to = header.get("effective_to")
+
+            confidence = float(header.get("confidence") or hdr_res.confidence or 0.0)
+
+            # 4️⃣ Signals
+            signals = build_signal_flags(pages)
+            # Build small, safe snippets (truncate + strip)
+            snippets = []
+            for p in pages[:2]:
+                txt = (p.get("text", "") or "").strip()
+                if txt:
+                    snippets.append(txt[:300])   # limit to 300 chars
+
+            # 5️⃣ Classification (JSON-safe by design)
+            class_trace = build_classification_trace(
+                method="LLM_HEADER+RULE_ENRICH",
+                final_type=doc_type,
+                final_role=doc_role,
+                confidence=confidence,
+                signals=signals,
+                evidence={
+                    "page_numbers": [p.get("page_number") for p in pages[:2]],
+                    "snippets": snippets,
+                },
+            )
+
+            # 6️⃣ Extraction summary (convert date → string here)
+            extraction_summary = build_extraction_summary(
+                effective_from=eff_from,
+                effective_to=eff_to,
+                extraction_method="LLM_HEADER",
+                confidence=confidence,
+                page_number=(pages[0].get("page_number") if pages else None),
+                raw_from=None,
+                raw_to=None,
+            )
+
+            # 7️⃣ Upsert header table (DB expects date → pass date)
+            try:
+                self.document_headers.upsert(
+                    document_id=document_id,
+                    header={
+                        "doc_type": doc_type,
+                        "doc_title": header.get("doc_title"),
+                        "doc_number": header.get("doc_number"),
+                        "effective_from": eff_from,
+                        "effective_to": eff_to,
+                        "parties": header.get("parties") or {},
+                        "extracted_fields": header.get("extracted_fields") or {},
+                        "extraction_method": "LLM_HEADER",
+                        "confidence": confidence,
+                    },
+                )
+
+                self.events.append(
+                    job_id=job_id,
+                    document_id=document_id,
+                    event_type="DOC_HEADER_ROW_UPSERT_OK",
+                    payload={
+                        "doc_type": doc_type,
+                        "confidence": confidence,
+                    },
+                )
+
+            except Exception as e:
+                warnings.append("DOC_HEADER_ROW_UPSERT_FAILED")
+                self.events.append(
+                    job_id=job_id,
+                    document_id=document_id,
+                    event_type="DOC_HEADER_ROW_UPSERT_FAILED",
+                    payload={"error": str(e), "doc_type": doc_type},
+                )
+
+           
+            # 8️⃣ Update canonical meta (date columns → date, JSON → safe)
+            
+            meta_payload = {
+                "document_type": doc_type,
+                "document_role": doc_role,
+                "effective_from": eff_from.isoformat() if eff_from else None,
+                "effective_to": eff_to.isoformat() if eff_to else None,
+                "source_system": "USER_UPLOAD",
+                "classification": class_trace,
+                "extraction_summary": extraction_summary,
+            }
+
+            meta_payload = _json_safe(meta_payload)
+
+            self.docs.update_meta(
+                document_id=document_id,
+                **meta_payload,
+            )
+
+            self.events.append(
+                job_id=job_id,
+                document_id=document_id,
+                event_type="DOC_META_UPDATED",
+                payload=_json_safe({
+                    "document_type": doc_type,
+                    "document_role": doc_role,
+                    "effective_from": eff_from,
+                    "effective_to": eff_to,
+                    "confidence": confidence,
+                    "signals": signals,
+                })
+                )
+
+        except Exception as e:
+            warnings.append("DOC_HEADER_META_FAILED")
+            self.events.append(
+                job_id=job_id,
+                document_id=document_id,
+                event_type="DOC_HEADER_META_FAILED",
+                payload={"error": str(e)},
+            )
+
+
+        # =================================================
+        # STEP 2.6: SupersessionResolver (version detection)
+        # =================================================
+        try:
+            doc = self.docs.get(document_id) or {}
+
+            doc_type2 = (doc.get("document_type") or "OTHER").upper()
+            eff_from_raw = doc.get("effective_from")
+
+            # Parse ISO string to date if needed
+            new_eff_date = None
+            if isinstance(eff_from_raw, str):
+                try:
+                    from datetime import date
+                    new_eff_date = date.fromisoformat(eff_from_raw)
+                except Exception:
+                    new_eff_date = None
+            elif eff_from_raw:
+                new_eff_date = eff_from_raw
+
+            self.events.append(
+                job_id=job_id,
+                document_id=document_id,
+                event_type="DOC_SUPERSESSION_STARTED",
+                payload=_json_safe({
+                    "document_type": doc_type2,
+                    "effective_from": eff_from_raw,
+                }),
+            )
+
+            sup = self.supersession.resolve(
+                new_document_id=document_id,
+                entity_id=entity_id,
+                contract_id=contract_id,
+                document_type=doc_type2,
+                new_effective_from=new_eff_date,
+            )
+
+            if sup.warnings:
+                warnings.extend(sup.warnings)
+
+            self.events.append(
+                job_id=job_id,
+                document_id=document_id,
+                event_type="DOC_SUPERSESSION_RESOLVED",
+                payload={
+                    "applied": sup.applied,
+                    "superseded_document_ids": sup.superseded_document_ids,
+                    "summary": sup.summary,
+                    "warnings": sup.warnings,
+                },
+            )
+
+        except Exception as e:
+            warnings.append("DOC_SUPERSESSION_FAILED")
+            self.events.append(
+                job_id=job_id,
+                document_id=document_id,
+                event_type="DOC_SUPERSESSION_FAILED",
+                payload={"error": str(e)},
+            )
+
+
+        
+       
         # =================================================
         # STEP 3: Clause extraction (LLM)
         # =================================================
@@ -319,7 +577,7 @@ class IngestionPipeline:
                 "content": ch["text"],
                 "metadata": {
                     "entity_id": entity_id,
-                    "entity_type": entity_type,
+                    
                     "contract_id": contract_id,
                 },
             })

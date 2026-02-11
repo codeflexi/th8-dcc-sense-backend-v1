@@ -2,6 +2,8 @@ from app.repositories.base import BaseRepository
 
 class IngestionJobRepository(BaseRepository):
     TABLE = "dcc_ingestion_jobs"
+    def __init__(self, sb):
+        super().__init__(sb)
 
     def create_job(self, *, document_id: str) -> dict:
         payload = {"document_id": document_id, "status": "PENDING"}
@@ -31,6 +33,9 @@ class IngestionJobRepository(BaseRepository):
 
 class IngestionEventRepository(BaseRepository):
     TABLE = "dcc_ingestion_events"
+    
+    def __init__(self, sb):
+        super().__init__(sb)
 
     def append(self, *, job_id: str, document_id: str, event_type: str, payload: dict | None = None):
         self.sb.table(self.TABLE).insert({"job_id": job_id, "document_id": document_id, "event_type": event_type, "payload": payload or {}}).execute()
