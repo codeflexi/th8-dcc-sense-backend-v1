@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional,List
 
 from app.repositories.base import BaseRepository
 from app.repositories.page_repo import PageRepository
@@ -148,33 +148,75 @@ class DocumentRepository(BaseRepository):
         if not res.data:
             raise Exception("UPDATE_META_FAILED")
 
+
+
     # -------------------------------------------------
     # Discovery support
     # -------------------------------------------------
+    def list_by_ids(self, document_ids: List[str]) -> List[Dict[str, Any]]:
+        if not document_ids:
+            return []
+        r = (
+            self.sb.table("dcc_documents")
+            .select("*")
+            .in_("document_id", document_ids)
+            .execute()
+        )
+        return getattr(r, "data", None) or []
+    
+    def list_by_ids(self, document_ids: List[str]) -> List[Dict[str, Any]]:
+        if not document_ids:
+            return []
+        r = (
+            self.sb.table("dcc_documents")
+            .select("*")
+            .in_("document_id", document_ids)
+            .execute()
+        )
+        return getattr(r, "data", None) or []
+
     def find_relational_candidates(
         self,
+        *,
         entity_id: str,
-        contract_id: str | None = None,
-    ) -> list[dict]:
+        contract_id: Optional[str] = None,
+        allow_vendor_fallback: bool = True,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
         """
-        IMPORTANT:
-        - exclude superseded docs to avoid wrong evidence
+        BUGFIX (minimal):
+        - ถ้ามี contract_id: ต้องเป็น AND ไม่ใช่ OR
+          entity_id == X AND contract_id == Y
+        - ถ้าไม่เจอและ allow_vendor_fallback=True -> fallback เป็น vendor-level (entity_id == X)
+
+        NOTE:
+        ตอนนี้ contract number จริงอยู่ที่ dcc_document_headers.doc_number
+        ดังนั้น service layer จะเป็นตัว enforce "requested_contract_number" อีกชั้น
         """
-        q = (
-            self.sb
-            .table(self.TABLE)
-            .select("document_id, entity_id, contract_id, document_type, document_role, effective_from, effective_to, superseded_by")
+        base = (
+            self.sb.table("dcc_documents")
+            .select("*")
+            .eq("entity_id", entity_id)
             .eq("status", "ACTIVE")
-            .is_("superseded_by", "null")
+            .is_("superseded_by", None)
+            .order("created_at", desc=True)
         )
 
         if contract_id:
-            q = q.or_(f"entity_id.eq.{entity_id},contract_id.eq.{contract_id}")
-        else:
-            q = q.eq("entity_id", entity_id)
+            r = base.eq("contract_id", contract_id).limit(limit).execute()
+            data = getattr(r, "data", None) or []
+            if data:
+                return data
 
-        res = q.execute()
-        return res.data or []
+            if allow_vendor_fallback:
+                r2 = base.limit(limit).execute()
+                return getattr(r2, "data", None) or []
+            return []
+
+        r = base.limit(limit).execute()
+        return getattr(r, "data", None) or []
+
+    
 
     def list_active_docs_for_supersession(
         self,

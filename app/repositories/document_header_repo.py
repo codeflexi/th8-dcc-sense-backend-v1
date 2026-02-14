@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional,List
 from datetime import date, datetime
 import json
 
@@ -39,6 +39,7 @@ def _json_safe(obj: Any) -> Any:
 
 class DocumentHeaderRepository(BaseRepository):
     TABLE = "dcc_document_headers"
+    TABLE_CONTRACT = "dcc_contract_headers"
 
     def __init__(self, sb):
         super().__init__(sb)
@@ -125,6 +126,63 @@ class DocumentHeaderRepository(BaseRepository):
         # res is APIResponse; success path -> res.data
         return res.data
 
+   
+   
+    def upsert_contract_header(self, *, document_id: str, header: Dict[str, Any]):
+        """
+        Deterministic normalization BEFORE DB write.
+
+        IMPORTANT (supabase-py v2):
+        - APIResponse has no `.error`
+        - errors are raised as exceptions
+        - use `.data` for result
+        """
+
+        parties = header.get("parties")
+        extracted_fields = header.get("extracted_fields")
+
+        row: Dict[str, Any] = {
+            "primary_document_id": document_id,
+            "vendor_entity_id": header.get("entity_id"),
+            "contract_code": header.get("doc_number"),
+            "vendor_name": _json_safe(parties) if parties is not None else {},
+            "buyer_name": _json_safe(parties) if parties is not None else {},
+            "effective_from": self._normalize_date_to_iso(header.get("effective_from")),
+            "effective_to": self._normalize_date_to_iso(header.get("effective_to")),
+            "status": header.get("status"),
+            # jsonb columns: ensure dict and JSON-safe
+           
+            "metadata": _json_safe(extracted_fields) if extracted_fields is not None else {},
+        }
+
+        # Remove None only (keep {} for jsonb)
+        clean_row = {k: v for k, v in row.items() if v is not None}
+
+        # Defensive: ensure jsonb payloads are actually JSON-serializable
+        # (will raise TypeError early with a clear error)
+        try:
+            json.dumps(clean_row.get("parties", {}))
+            json.dumps(clean_row.get("extracted_fields", {}))
+        except TypeError as e:
+            raise RuntimeError(f"[dcc_document_headers.upsert] jsonb not serializable: {e}")
+
+        try:
+            res = (
+                self.sb
+                .table(self.TABLE_CONTRACT)
+                .upsert(clean_row, on_conflict="document_id")
+                .execute()
+            )
+        except Exception as e:
+            # supabase-py v2 raises exceptions for API errors
+            raise RuntimeError(f"[dcc_document_headers.upsert] failed: {e}")
+
+        # res is APIResponse; success path -> res.data
+        return res.data
+
+   
+   
+        
     def get_by_document(self, document_id: str) -> Optional[Dict[str, Any]]:
         """
         IMPORTANT (supabase-py v2):
@@ -144,3 +202,25 @@ class DocumentHeaderRepository(BaseRepository):
             raise RuntimeError(f"[dcc_document_headers.get_by_document] failed: {e}")
 
         return res.data
+
+    def get_by_document_id(self, document_id: str) -> Optional[Dict[str, Any]]:
+        r = (
+            self.sb.table(self.TABLE)
+            .select("*")
+            .eq("document_id", document_id)
+            .limit(1)
+            .execute()
+        )
+        data = getattr(r, "data", None) or []
+        return data[0] if data else None
+
+    def list_by_document_ids(self, document_ids: List[str]) -> List[Dict[str, Any]]:
+        if not document_ids:
+            return []
+        r = (
+            self.sb.table(self.TABLE)
+            .select("*")
+            .in_("document_id", document_ids)
+            .execute()
+        )
+        return getattr(r, "data", None) or []

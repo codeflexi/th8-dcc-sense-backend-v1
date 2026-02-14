@@ -30,6 +30,22 @@ class PriceItemRepository(BaseRepository):
             .eq("document_id", document_id)
             .execute()
         ).data
+        
+    def list_by_document_ids(self, document_ids: List[str]) -> List[Dict[str, Any]]:
+        if not document_ids:
+            return []
+        r = (
+            self.sb.table(self.TABLE)
+            .select("*")
+            .in_("document_id", document_ids)
+            .execute()
+        )
+        return getattr(r, "data", None) or []
+    
+    def create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        r = self.sb.table(self.TABLE).insert(payload).execute()
+        data = getattr(r, "data", None) or []
+        return data[0] if data else payload
 
     def list_by_document_page(
         self,

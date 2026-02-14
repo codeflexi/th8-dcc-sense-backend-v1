@@ -13,6 +13,26 @@ meta:
     rounding:
       money_decimals: 2
       pct_decimals: 2
+      
+  # ... existing fields ...
+  discovery:
+    # Relational first; run vector only if relational is insufficient
+    min_relational_docs: 3
+    enable_vector_backfill: true
+
+    # Vector quality gates
+    vector_min_similarity: 0.42
+    vector_top_k_chunks: 50
+    vector_top_k_docs: 15
+    vector_top_chunks_per_doc: 3
+
+    # Cap how many docs can be inferred from vector per case
+    vector_max_inferred_docs: 12
+
+    # Contract guard for audit-grade safety:
+    # STRICT = if case has contract_id, accept only docs with same contract_id (reject missing/unknown)
+    # SOFT   = (optional future) allow unknown contract docs with penalty/cap
+    contract_guard_mode: "STRICT"
 
 # =========================================================
 # DOMAIN PACKS (LOCKED SHAPE)

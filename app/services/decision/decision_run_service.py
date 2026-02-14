@@ -162,13 +162,42 @@ class DecisionRunService:
 
             risk_level = self._normalize_risk_level(agg["risk_level"])
             
+            agg = self._aggregate_case(group_results)
+            summary = self._json_safe(agg["summary"])
+
+            risk_level = self._normalize_risk_level(agg["risk_level"])
+
+            # =====================================================
+            # RUN-LEVEL DECISION MAPPING (DB CONSTRAINT SAFE)
+            # DB allows: APPROVE / REVIEW / ESCALATE / REJECT
+            # =====================================================
+            group_decision = agg["decision"]  # PASS / REVIEW / REJECT
+
+            if group_decision == "PASS":
+                run_decision = "APPROVE"
+
+            elif group_decision == "REVIEW":
+                # escalate automatically if high risk
+                if risk_level in ("HIGH", "CRITICAL"):
+                    run_decision = "ESCALATE"
+                else:
+                    run_decision = "REVIEW"
+
+            elif group_decision == "REJECT":
+                run_decision = "REJECT"
+
+            else:
+                # deterministic fallback
+                run_decision = "REVIEW"
+
             self.run_repo.complete_run(
                 run_id=run_id,
-                decision=agg["decision"],
+                decision=run_decision,
                 risk_level=risk_level,
                 confidence=agg["confidence"],
                 summary=summary,
             )
+
             
             response = {
                 "run_id": run_id,

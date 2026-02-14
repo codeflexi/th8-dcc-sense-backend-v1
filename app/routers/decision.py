@@ -13,6 +13,7 @@ from app.repositories.case_evidence_group_repo import CaseEvidenceGroupRepositor
 from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 from app.repositories.audit_repo import AuditRepository
+from app.services.decision.case_processing_service import CaseProcessingService
 
 router = APIRouter(
 )

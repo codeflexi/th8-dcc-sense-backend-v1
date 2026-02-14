@@ -52,7 +52,7 @@ class DiscoveryQueryService:
                 "document_id": r.get("document_id"),
                 "filename": doc.get("filename"),
                 "entity_id": doc.get("entity_id"),
-                "entity_type": doc.get("entity_type"),
+                
                 "contract_id": doc.get("contract_id"),
                 "link_status": r.get("link_status"),
                 "inferred_by": r.get("inferred_by"),

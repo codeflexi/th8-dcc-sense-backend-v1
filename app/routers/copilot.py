@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.copilot.copilot_agent import CopilotAgent
+from app.infra.supabase_client import get_supabase
 
 router = APIRouter()
 
@@ -39,6 +40,7 @@ async def chat_stream(req: ChatRequest):
     agent = CopilotAgent()
 
     generator: AsyncGenerator[str, None] = agent.run_workflow(
+        sb=get_supabase(),
         user_query=req.query,
         case_id=req.case_id,
         group_id=req.group_id,

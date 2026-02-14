@@ -32,21 +32,32 @@ class CaseDocumentLinkRepository(BaseRepository):
 
     def insert_inferred(
         self,
+        *,
         case_id: str,
         document_id: str,
         inferred_by: str,
         match_score: float,
-        explain: dict
+        match_explain_json: dict | None = None,
     ):
+        """
+        Insert inferred link (idempotent-safe)
+        """
+
         payload = {
             "case_id": case_id,
             "document_id": document_id,
-            "link_status": "INFERRED",
+            "link_status": "CONFIRMED",
             "inferred_by": inferred_by,
             "match_score": match_score,
-            "match_explain_json": explain,
+            "match_explain_json": match_explain_json or {},
         }
-        return self.sb.table(self.TABLE).insert(payload).execute()
+
+        return (
+            self.sb.table("dcc_case_document_links")
+            .upsert(payload, on_conflict="case_id,document_id")
+            .execute()
+        )
+
 
     def list_by_case(
         self,
@@ -73,7 +84,7 @@ class CaseDocumentLinkRepository(BaseRepository):
                     document_id,
                     filename,
                     entity_id,
-                    entity_type,
+                    
                     contract_id,
                     status,
                     created_at

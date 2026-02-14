@@ -1,4 +1,4 @@
-# app/services/copilot/copilot_agent.py
+import asyncio
 import json
 import os
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
@@ -6,6 +6,8 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 from openai import OpenAI
 
 from app.repositories.copilot_repo import CopilotRepositoryAgent
+from app.repositories.copilot_audit_ropo import CopilotAuditRepository
+from app.services.copilot.copilot_orchestrator import CopilotOrchestrator
 
 
 ALLOWED_TOOLS = {
@@ -15,6 +17,10 @@ ALLOWED_TOOLS = {
     "get_group_rules",
     "get_group_evidence",
     "open_document_page",
+
+    "get_contract_summary",
+    "get_contract_clauses",
+    "evaluate_contract_risk",
 }
 
 
@@ -23,7 +29,6 @@ class CopilotAgent:
     Enterprise Copilot (case scoped)
     - Case-scoped only
     - Deterministic tool allowlist
-    - Multi-domain via case.domain
     - Evidence-first (reveal evidence refs)
     - Produces decision-ready answer (approve/reject/review + rationale + next steps)
     """
@@ -33,15 +38,9 @@ class CopilotAgent:
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model_name = os.getenv("COPILOT_MODEL", "gpt-4o-mini")
 
-    # -------------------------
-    # NDJSON event helper
-    # -------------------------
     def _evt(self, t: str, data: Dict[str, Any]) -> str:
         return json.dumps({"type": t, "data": data}, ensure_ascii=False) + "\n"
 
-    # -------------------------
-    # Tool wrapper
-    # -------------------------
     async def _tool(self, name: str, **kwargs):
         if name not in ALLOWED_TOOLS:
             raise RuntimeError(f"Tool not allowed: {name}")
@@ -51,14 +50,9 @@ class CopilotAgent:
         return await fn(**kwargs)
 
     # -------------------------
-    # Normalization helpers
+    # Normalization helpers (KEEP)
     # -------------------------
     def _extract_case_payload(self, case_detail: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        """
-        รองรับทั้ง:
-        A) { "case": {...}, "line_items":[...] }
-        B) { ...case fields at root..., "line_items":[...] }
-        """
         if not isinstance(case_detail, dict):
             return {}, []
 
@@ -67,16 +61,10 @@ class CopilotAgent:
             line_items = case_detail.get("line_items") or []
             return case_obj, line_items if isinstance(line_items, list) else []
 
-        # fallback: assume root is case
         line_items = case_detail.get("line_items") or []
         return case_detail, line_items if isinstance(line_items, list) else []
 
     def _normalize_entity(self, case_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        ทำให้ AI เข้าใจ entity แบบ enterprise:
-        - entity_type: VENDOR/CUSTOMER/EMPLOYEE/...
-        - entity_id / entity_name (ถ้ามี)
-        """
         entity_type = (case_obj.get("entity_type") or "").upper().strip()
         if entity_type in ("VENDOR", "SUPPLIER"):
             entity_class = "VENDOR"
@@ -110,7 +98,6 @@ class CopilotAgent:
         out: List[Dict[str, Any]] = []
         for g in (groups or [])[:50]:
             sku = g.get("sku")
-            # sku ในระบบคุณเป็น object (มี sku/name/price ฯลฯ)
             sku_obj = sku if isinstance(sku, dict) else {}
             out.append({
                 "group_id": g.get("group_id"),
@@ -133,11 +120,6 @@ class CopilotAgent:
         return out
 
     def _extract_actionable_evidence_refs(self, evid_pack: Dict[str, Any], case_id: str, group_id: str, max_refs: int) -> List[Dict[str, Any]]:
-        """
-        Normalize evidence for both:
-        - evidence.source_page/source_snippet
-        - evidence.price_items[*].page_number/snippet
-        """
         if not isinstance(evid_pack, dict):
             return []
 
@@ -164,13 +146,11 @@ class CopilotAgent:
             page = ev.get("source_page")
             snippet = ev.get("source_snippet")
 
-            # fallback: use price_items
             if (page is None or snippet is None) and isinstance(ev.get("price_items"), list) and ev["price_items"]:
                 pi0 = ev["price_items"][0] if isinstance(ev["price_items"][0], dict) else {}
                 page = page or pi0.get("page_number")
                 snippet = snippet or pi0.get("snippet")
 
-            # final fallback
             page = int(page) if page else None
             snippet = (snippet or "").strip()
 
@@ -185,27 +165,24 @@ class CopilotAgent:
                 })
 
         return refs
-    
+
     def _build_decision_brief(
         self,
         case_detail: dict,
-        decision_summary: dict,
+        decision_summary: Optional[dict],
         groups: list,
-        evid_pack: dict | None,
+        evid_pack: Optional[dict],
+        orchestrator_ctx: Optional[dict] = None,
     ) -> dict:
-
         case_root = case_detail.get("case", case_detail)
 
-        # -------- PARTY / VENDOR ----------
         vendor = (
             case_root.get("entity_name")
             or case_root.get("vendor_name")
             or case_root.get("entity_id")
         )
 
-        # -------- ITEMS ----------
         items = case_detail.get("line_items") or []
-
         items_slim = []
         for it in items[:20]:
             items_slim.append({
@@ -216,11 +193,11 @@ class CopilotAgent:
                 "total": (it.get("total_price") or {}).get("value"),
             })
 
-        # -------- GROUP RISKS ----------
         risks = []
-        for g in groups:
+        for g in (groups or []):
             if g.get("risk_level") in ("HIGH", "CRITICAL") or g.get("decision") == "REVIEW":
                 sku = g.get("sku") or {}
+                reasons = g.get("reasons", [])
                 risks.append({
                     "group_id": g.get("group_id"),
                     "sku": sku.get("sku"),
@@ -229,23 +206,24 @@ class CopilotAgent:
                     "risk": g.get("risk_level"),
                     "baseline": (g.get("baseline") or {}).get("value"),
                     "price": (sku.get("unit_price") or {}).get("value"),
-                    "reasons": [r.get("exec") for r in g.get("reasons", [])]
+                    "reasons": [r.get("exec") for r in reasons] if isinstance(reasons, list) else [],
                 })
 
-        # -------- EVIDENCE ----------
         evidence_refs = []
-        if evid_pack:
-            docs = {d["document_id"]: d["file_name"] for d in evid_pack.get("documents", [])}
-            for ev in evid_pack.get("evidences", [])[:6]:
+        if evid_pack and isinstance(evid_pack, dict):
+            docs = {d.get("document_id"): d.get("file_name") for d in (evid_pack.get("documents") or []) if isinstance(d, dict)}
+            for ev in (evid_pack.get("evidences") or [])[:6]:
+                if not isinstance(ev, dict):
+                    continue
                 doc_id = ev.get("document_id")
                 page = ev.get("source_page") or (ev.get("price_items") or [{}])[0].get("page_number")
                 evidence_refs.append({
-                    "doc": docs.get(doc_id),
+                    "doc": docs.get(doc_id) or doc_id,
                     "page": page,
                     "snippet": ev.get("source_snippet") or (ev.get("price_items") or [{}])[0].get("snippet"),
                 })
 
-        return {
+        out = {
             "case": {
                 "case_id": case_root.get("case_id"),
                 "po": case_root.get("reference_id"),
@@ -254,16 +232,17 @@ class CopilotAgent:
                 "currency": case_root.get("currency"),
                 "status": case_root.get("status"),
             },
-            "decision": decision_summary,
+            "decision": decision_summary or {},
             "items": items_slim,
             "risk_items": risks,
             "evidence": evidence_refs,
         }
 
+        if orchestrator_ctx:
+            out["tool_context"] = orchestrator_ctx
 
-    # -------------------------
-    # Context pack
-    # -------------------------
+        return out
+
     def _build_context_pack(
         self,
         *,
@@ -274,8 +253,7 @@ class CopilotAgent:
         groups: List[Dict[str, Any]],
         picked_group_id: Optional[str],
         picked_group_rules: Optional[Dict[str, Any]],
-        picked_group_evidence: Optional[Dict[str, Any]]
-        
+        picked_group_evidence: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         entity = self._normalize_entity(case_obj)
 
@@ -293,7 +271,6 @@ class CopilotAgent:
             **entity,
         }
 
-        # line_items slim
         items_slim: List[Dict[str, Any]] = []
         for it in (line_items or [])[:50]:
             if not isinstance(it, dict):
@@ -323,17 +300,10 @@ class CopilotAgent:
                 "rules": picked_group_rules or {},
                 "evidence": picked_group_evidence or {},
             },
-            
         }
         return pack
 
-    # -------------------------
-    # System prompt (Enterprise)
-    # -------------------------
     def _system_prompt(self, ctx: Dict[str, Any]) -> str:
-        """
-        ให้ AI ตอบแบบ “พร้อมตัดสินใจ” และ “ไม่เดา”
-        """
         return f"""
 คุณคือ TH8 Enterprise Case Copilot (Decision Support).
 เป้าหมาย: ช่วยผู้อนุมัติ/ผู้ตรวจสอบ “ตัดสินใจเคสนี้” จากข้อมูลใน CONTEXT เท่านั้น
@@ -353,81 +323,137 @@ E) Missing info (ถ้ามี): ต้องการข้อมูลอะ
 
 CONTEXT (JSON):
 {json.dumps(ctx, ensure_ascii=False)}
-        """.strip() 
-        
+        """.strip()
 
-
-
-    # -------------------------
-    # Main workflow
-    # -------------------------
     async def run_workflow(
         self,
+        *,
+        sb,
         user_query: str,
         case_id: str,
         group_id: Optional[str] = None,
         locale: str = "th-TH",
         max_evidence_refs: int = 6,
+        orch_enabled: bool = True,
+        orch_budget_tokens: int = 900,
     ) -> AsyncGenerator[str, None]:
 
-        # Step 1: load case
+        audit = CopilotAuditRepository(sb)
+
+        # simple per-request cache (avoid accidental duplicate tool calls)
+        cache: Dict[str, Any] = {}
+
+        # -------------------------------------------------
+        # Step 1: load case ONCE
+        # -------------------------------------------------
         yield self._evt("trace", {"step_id": 1, "title": "Load case", "status": "active", "desc": f"case_id={case_id}"})
+
+        await audit.log_tool_call(case_id=case_id, tool_name="get_case_detail", tool_args={"case_id": case_id}, meta={})
         case_detail = await self._tool("get_case_detail", case_id=case_id)
+        await audit.log_tool_result(case_id=case_id, tool_name="get_case_detail", result=case_detail or {}, meta={})
+
         if not case_detail:
             yield self._evt("error", {"message": "Case not found"})
             yield self._evt("message_chunk", {"text": "ไม่พบข้อมูลเคสนี้ในระบบ"})
             return
 
+        cache["case_detail"] = case_detail
         case_obj, line_items = self._extract_case_payload(case_detail)
 
-        # Step 2: decision summary (optional)
-        decision_summary = None
-        try:
-            yield self._evt("trace", {"step_id": 2, "title": "Load decision summary", "status": "active", "desc": "decision-summary"})
-            decision_summary = await self._tool("get_case_decision_summary", case_id=case_id)
-        except Exception as e:
+        # -------------------------------------------------
+        # Step 2 & 3: decision summary + groups (PARALLEL)
+        # -------------------------------------------------
+        yield self._evt("trace", {"step_id": 2, "title": "Load decision summary + groups", "status": "active", "desc": "parallel"})
+
+        async def _load_decision():
+            await audit.log_tool_call(case_id=case_id, tool_name="get_case_decision_summary", tool_args={"case_id": case_id}, meta={})
+            res = await self._tool("get_case_decision_summary", case_id=case_id)
+            await audit.log_tool_result(case_id=case_id, tool_name="get_case_decision_summary", result=res or {}, meta={})
+            return res
+
+        async def _load_groups():
+            await audit.log_tool_call(case_id=case_id, tool_name="get_case_groups", tool_args={"case_id": case_id}, meta={})
+            res = await self._tool("get_case_groups", case_id=case_id)
+            await audit.log_tool_result(case_id=case_id, tool_name="get_case_groups", result={"count": len(res or [])}, meta={})
+            return res
+
+        decision_summary, groups_res = await asyncio.gather(_load_decision(), _load_groups(), return_exceptions=True)
+
+        if isinstance(decision_summary, Exception):
             decision_summary = None
-            yield self._evt("trace", {"step_id": 2, "title": "Load decision summary", "status": "failed", "desc": str(e)})
+        if isinstance(groups_res, Exception):
+            groups_res = []
 
-        # Step 3: groups
-        yield self._evt("trace", {"step_id": 3, "title": "Load groups", "status": "active", "desc": "case groups"})
-        groups_res = await self._tool("get_case_groups", case_id=case_id)
         groups = groups_res or []
-
         picked_group_id = self._pick_group(groups, group_id)
 
-        # Step 4: rules + evidence for picked group
+        # -------------------------------------------------
+        # Step 4 & 5: rules + evidence (PARALLEL)
+        # -------------------------------------------------
         picked_rules = None
         picked_evidence = None
 
         if picked_group_id:
-            # rules
-            try:
-                yield self._evt("trace", {"step_id": 4, "title": "Load rules", "status": "active", "desc": f"group_id={picked_group_id}"})
-                picked_rules = await self._tool("get_group_rules", group_id=picked_group_id)
-                yield self._evt("trace", {"step_id": 4, "title": "Load rules", "status": "completed", "desc": "rules loaded"})
-            except Exception as e:
+            yield self._evt("trace", {"step_id": 4, "title": "Load rules + evidence", "status": "active", "desc": f"group_id={picked_group_id} (parallel)"})
+
+            async def _load_rules():
+                await audit.log_tool_call(case_id=case_id, tool_name="get_group_rules", tool_args={"group_id": picked_group_id}, meta={})
+                res = await self._tool("get_group_rules", group_id=picked_group_id)
+                await audit.log_tool_result(case_id=case_id, tool_name="get_group_rules", result=res or {}, meta={})
+                return res
+
+            async def _load_evidence():
+                await audit.log_tool_call(case_id=case_id, tool_name="get_group_evidence", tool_args={"group_id": picked_group_id}, meta={})
+                res = await self._tool("get_group_evidence", group_id=picked_group_id)
+                await audit.log_tool_result(case_id=case_id, tool_name="get_group_evidence", result={"keys": list((res or {}).keys())[:50]}, meta={})
+                return res
+
+            picked_rules, picked_evidence = await asyncio.gather(_load_rules(), _load_evidence(), return_exceptions=True)
+
+            if isinstance(picked_rules, Exception):
                 picked_rules = None
-                yield self._evt("trace", {"step_id": 4, "title": "Load rules", "status": "failed", "desc": str(e)})
-
-            # evidence
-            try:
-                yield self._evt("trace", {"step_id": 5, "title": "Load evidence", "status": "active", "desc": f"group_id={picked_group_id}"})
-                picked_evidence = await self._tool("get_group_evidence", group_id=picked_group_id)
-                yield self._evt("trace", {"step_id": 5, "title": "Load evidence", "status": "completed", "desc": "evidence loaded"})
-            except Exception as e:
+            if isinstance(picked_evidence, Exception):
                 picked_evidence = None
-                yield self._evt("trace", {"step_id": 5, "title": "Load evidence", "status": "failed", "desc": str(e)})
 
-        # Step 6: reveal evidence refs to UI (for transparency)
+        # -------------------------------------------------
+        # Step 6: reveal evidence refs to UI
+        # -------------------------------------------------
         if picked_group_id and isinstance(picked_evidence, dict):
             refs = self._extract_actionable_evidence_refs(picked_evidence, case_id, picked_group_id, max_evidence_refs)
             for r in refs:
                 yield self._evt("evidence_reveal", r)
-                
-       
 
-        # Build context
+        # -------------------------------------------------
+        # Orchestrator (optional) — NO case reload
+        # -------------------------------------------------
+        orchestrator_ctx = None
+        if orch_enabled:
+            yield self._evt("trace", {"step_id": 0, "title": "Orchestrator", "status": "active", "desc": "plan extra tools (no base reload)"})
+            try:
+                orch = CopilotOrchestrator(
+                    tool_fn=self._tool,
+                    audit_repo=audit,
+                    planner_model=self.model_name,
+                    max_budget_tokens=orch_budget_tokens,
+                    max_calls_per_round=2,
+                    max_rounds=1,
+                )
+                orchestrator_ctx = await orch.run(
+                    user_query=user_query,
+                    case_id=case_id,
+                    context_hint={
+                        "domain": case_obj.get("domain"),
+                        "picked_group_id": picked_group_id,
+                        "has_evidence": bool(picked_evidence),
+                    },
+                )
+            except Exception as e:
+                orchestrator_ctx = {"error": str(e)}
+            yield self._evt("trace", {"step_id": 0, "title": "Orchestrator", "status": "completed", "desc": "done"})
+
+        # -------------------------------------------------
+        # Build context (KEEP)
+        # -------------------------------------------------
         ctx_pack = self._build_context_pack(
             locale=locale,
             case_obj=case_obj,
@@ -436,25 +462,22 @@ CONTEXT (JSON):
             groups=groups,
             picked_group_id=picked_group_id,
             picked_group_rules=picked_rules,
-            picked_group_evidence=picked_evidence
-            
+            picked_group_evidence=picked_evidence,
         )
-        
-        
 
-       
         yield self._evt("trace", {"step_id": 6, "title": "Context ready", "status": "completed", "desc": "context pack built"})
         yield self._evt("trace", {"step_id": 7, "title": "Answer", "status": "active", "desc": "LLM streaming"})
 
-
+        # Use brief (KEEP) + attach orchestrator_ctx
         brief = self._build_decision_brief(
-            case_detail,
-            decision_summary,
-            groups,
-            picked_evidence
+            case_detail=case_detail,
+            decision_summary=decision_summary,
+            groups=groups,
+            evid_pack=picked_evidence,
+            orchestrator_ctx=orchestrator_ctx,
         )
+
         system_prompt = self._system_prompt(brief)
-        # system_prompt = self._system_prompt(ctx_pack)
 
         try:
             stream = self.client.chat.completions.create(

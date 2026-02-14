@@ -304,6 +304,7 @@ class IngestionPipeline:
                     header={
                         "doc_type": doc_type,
                         "doc_title": header.get("doc_title"),
+                        "entity_id": entity_id,
                         "doc_number": header.get("doc_number"),
                         "effective_from": eff_from,
                         "effective_to": eff_to,
@@ -311,6 +312,7 @@ class IngestionPipeline:
                         "extracted_fields": header.get("extracted_fields") or {},
                         "extraction_method": "LLM_HEADER",
                         "confidence": confidence,
+                        "status": "Active",
                     },
                 )
 

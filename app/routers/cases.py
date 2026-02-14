@@ -9,6 +9,7 @@ from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 from app.services.case.case_decision_summary_service import CaseDecisionSummaryService
 from app.services.case.case_group_service import CaseGroupService
+from app.services.decision.case_processing_service import CaseProcessingService
 
 
 from typing import Dict, Any, List
@@ -179,3 +180,21 @@ def get_case_groups(request: Request, case_id: str):
         return case_group_service.get_groups(case_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/cases/{case_id}/process")
+def process_case(
+    request: Request,
+    case_id: str,
+    domain: str = Query(...),
+    actor_id: str = Query("SYSTEM"),
+):
+    sb = request.state.sb
+    service = CaseProcessingService(sb)
+
+    result = service.run(
+        case_id=case_id,
+        domain=domain,
+        actor_id=actor_id,
+    )
+
+    return result    
