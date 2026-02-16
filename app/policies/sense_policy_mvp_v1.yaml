@@ -13,7 +13,10 @@ meta:
     rounding:
       money_decimals: 2
       pct_decimals: 2
-      
+    tolerances:
+      qty_abs: 0
+      price_abs: 0
+      amount_pct: 0.5  
   # ... existing fields ...
   discovery:
     # Relational first; run vector only if relational is insufficient
@@ -145,7 +148,7 @@ domains:
           type: compare
           field: variance_pct
           operator: ">"
-          value: 3                   # percent
+          value: 8                   # percent
         fail_actions:
           - REVIEW
         explanation:
@@ -187,76 +190,65 @@ domains:
 
 
   finance_ap:
-    description: Accounts Payable control
-    profile:
-      baseline_priority:
-        - T_INVOICE_MATCH_BASE
-        - T_NO_BASELINE_ESCALATE
+  description: Accounts Payable control (3-way matching)
+  profile:
+    # finance_ap ไม่ใช้ baseline techniques แบบ procurement
+    # ให้ decision-run ทำงานจาก ledger snapshot โดยตรง
+    baseline_priority: []
 
-    calculations:
-      # Placeholder: when you add AP artifacts later, you add here first
-      duplicate_invoice_flag:
-        description: Duplicate invoice detection flag
-        unit: BOOLEAN
-        formula_id: DUP_INVOICE
-        inputs:
-          invoice_number: "$ap.invoice.invoice_number"
-          vendor_id: "$ap.invoice.vendor_id"
-        guards:
-          - not_null: ["invoice_number", "vendor_id"]
-        output:
-          field: "duplicate_invoice_flag"
+  calculations:
+    three_way:
+      description: 3-way match from ledger snapshot (PO vs GRN vs INVOICE)
+      unit: OBJECT
+      formula_id: THREE_WAY_MATCH
+      inputs:
+        po_lines: "$ap.po_lines"
+        gr_lines: "$ap.gr_lines"
+        inv_lines: "$ap.inv_lines"
+      params:
+        qty_abs_tolerance: "$meta.defaults.tolerances.qty_abs"
+        qty_pct_tolerance: 0
+        price_abs_tolerance: "$meta.defaults.tolerances.price_abs"
+        price_pct_tolerance: 0
+      guards:
+        - not_null: ["po_lines", "gr_lines", "inv_lines"]
+      output:
+        field: "three_way"
 
-    techniques:
-      - id: T_INVOICE_MATCH_BASE
-        category: BASELINE
-        description: Invoice-centric baseline for reconciliation
-        required_artifacts: [PO, INVOICE]
-        gates: {}
-        derive:
-          baseline_from: INVOICE
+  rules:
+    - rule_id: A-REC-01
+      group: COMPLIANCE
+      severity: HIGH
+      description: 3-way matching must pass (invoice_qty <= grn_qty, price vs PO within tolerance)
+      preconditions: {}
+      uses: ["three_way"]
+      logic:
+        type: compare
+        field: three_way_ok
+        operator: "=="
+        value: true
+      fail_actions:
+        - REVIEW
+      explanation:
+        exec: "ผล 3-way matching ไม่ผ่าน (จำนวน/ราคาไม่ตรงกัน หรือ invoice มากกว่า GRN)"
+        audit: "3-way match failed: {three_way_mismatches}"
 
-      - id: T_NO_BASELINE_ESCALATE
-        category: FALLBACK
-        description: No reliable baseline available
-        outcome:
-          readiness_flag: baseline_available=false
-          required_action: REVIEW
-
-    rules:
-      - rule_id: A-REC-01
-        group: COMPLIANCE
-        severity: HIGH
-        description: 3-way matching
-        preconditions:
-          artifacts_present: [PO, GR, INVOICE]
-        uses: []
-        logic:
-          type: three_way_match
-          fields: [quantity, unit_price]
-        fail_actions:
-          - REVIEW
-        explanation:
-          exec: "ข้อมูล PO / รับของ / ใบแจ้งหนี้ไม่ตรงกัน"
-          audit: "3-way match failed: {mismatches}"
-
-      - rule_id: A-FRAUD-01
-        group: FRAUD
-        severity: HIGH
-        description: Duplicate invoice detection
-        preconditions: {}
-        uses: ["duplicate_invoice_flag"]
-        logic:
-          type: compare
-          field: duplicate_invoice_flag
-          operator: "=="
-          value: true
-        fail_actions:
-          - REVIEW
-        explanation:
-          exec: "พบใบแจ้งหนี้ซ้ำ"
-          audit: "Duplicate invoice detected"
-
+    - rule_id: A-FRAUD-01
+      group: FRAUD
+      severity: HIGH
+      description: Duplicate invoice detection (deterministic placeholder)
+      preconditions: {}
+      uses: ["duplicate_invoice_flag"]
+      logic:
+        type: compare
+        field: duplicate_invoice_flag
+        operator: "=="
+        value: true
+      fail_actions:
+        - REVIEW
+      explanation:
+        exec: "พบใบแจ้งหนี้ซ้ำ"
+        audit: "Duplicate invoice detected"
 # =========================================================
 # DECISION AGGREGATION (LOCKED SHAPE)
 # =========================================================

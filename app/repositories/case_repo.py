@@ -67,6 +67,36 @@ class CaseRepository(BaseRepository):
         if not res.data:
             raise RuntimeError("Failed to create case")
         return res.data[0]
+    
+    def update_transaction_id(self, case_id: str, transaction_id: str):
+        res = (
+            self.sb.table("dcc_cases")
+            .update({"transaction_id": transaction_id})
+            .eq("case_id", case_id)
+            .execute()
+        )
+        return res.data
+    
+    def merge_case_detail(self, case_id: str, patch: dict):
+        current = (
+            self.sb.table("dcc_cases")
+            .select("case_detail")
+            .eq("case_id", case_id)
+            .single()
+            .execute()
+        )
+
+        existing = current.data.get("case_detail") or {}
+
+        # shallow merge (safe for ui object)
+        merged = {**existing, **patch}
+
+        return (
+            self.sb.table("dcc_cases")
+            .update({"case_detail": merged})
+            .eq("case_id", case_id)
+            .execute()
+        )
 
     # =====================================================
     # List – cases (VIEW)

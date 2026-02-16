@@ -15,6 +15,7 @@ from app.routers.facts import router as facts_router
 from app.routers.decision import router as decision_router
 from app.routers.groups import router as groups_router
 from app.routers.copilot import router as copilot_router
+from app.routers.transactions import router as transactions_router
 
 # Policy bootstrap
 from app.services.policy.loader import load_policy_from_file
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(groups_router, prefix="/api/v1/groups", tags=["groups"])
     app.include_router(copilot_router, prefix="/api/v1/copilot", tags=["copilot"])
     app.include_router(decision_router, prefix="/api/v1/decision", tags=["decision"])
+    app.include_router(transactions_router, prefix="/api/v1/transactions", tags=["transactions"])
     app.include_router(viewer_router, tags=["viewer"])
 
     return app

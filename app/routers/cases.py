@@ -9,7 +9,7 @@ from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 from app.services.case.case_decision_summary_service import CaseDecisionSummaryService
 from app.services.case.case_group_service import CaseGroupService
-from app.services.decision.case_processing_service import CaseProcessingService
+from app.services.case.case_processing_run_service import CaseProcessingRunService
 
 
 from typing import Dict, Any, List
@@ -189,7 +189,7 @@ def process_case(
     actor_id: str = Query("SYSTEM"),
 ):
     sb = request.state.sb
-    service = CaseProcessingService(sb)
+    service = CaseProcessingRunService(sb)
 
     result = service.run(
         case_id=case_id,

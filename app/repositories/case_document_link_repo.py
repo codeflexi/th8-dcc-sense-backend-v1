@@ -3,6 +3,7 @@ from datetime import datetime , timezone
 
 class CaseDocumentLinkRepository(BaseRepository):
     TABLE = "dcc_case_document_links"
+    DOC_TABLE = "dcc_documents"
      # =====================================================
     # Constructor
     # =====================================================
@@ -84,9 +85,10 @@ class CaseDocumentLinkRepository(BaseRepository):
                     document_id,
                     filename,
                     entity_id,
-                    
+                    content_type,
                     contract_id,
                     status,
+                    storage_key,
                     created_at
                 )
                 """

@@ -19,21 +19,14 @@ from app.repositories.case_decision_result_repo import CaseDecisionResultReposit
 from app.repositories.case_evidence_group_repo import CaseEvidenceGroupRepository
 from app.repositories.case_line_item_repo import CaseLineItemRepository
 from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
-from app.services.decision.decision_run_service import DecisionRunService
+from app.repositories.document_header_repo import DocumentHeaderRepository
 
 
 class CaseProcessingService:
     """
     Enterprise deterministic pipeline orchestrator.
-
-    Executes full decision pipeline in strict order:
-    DISCOVER → EXTRACT → GROUP → DERIVE → SELECT → DECISION_RUN
-
-    Guarantees:
-    - Ordered execution
-    - Audit trail
-    - Failure isolation
-    - Deterministic output
+    Strict order:
+      DISCOVER → EXTRACT → GROUP → DERIVE → SELECT → DECISION_RUN
     """
 
     def __init__(self, sb):
@@ -42,13 +35,13 @@ class CaseProcessingService:
         self.case_repo = CaseRepository(sb)
 
         self.discovery_service = DiscoveryService(sb)
-        
-        
-        self.extract_service = EvidenceExtractionService(sb=sb)
-        self.group_service = EvidenceGroupingService(sb=sb)
-        self.fact_service = FactDerivationService(sb=sb)
-        self.selection_service = SelectionService(sb=sb)
-        # ---------- decision (manual injection required) ----------
+
+        self.extract_service = self._safe_construct(EvidenceExtractionService, sb)
+        self.group_service = self._safe_construct(EvidenceGroupingService, sb)
+        self.fact_service = self._safe_construct(FactDerivationService, sb)
+        self.selection_service = self._safe_construct(SelectionService, sb)
+
+        # decision-run (repo-injected; locked)
         self.decision_service = DecisionRunService(
             run_repo=DecisionRunRepository(sb),
             result_repo=CaseDecisionResultRepository(sb),
@@ -56,25 +49,25 @@ class CaseProcessingService:
             case_line_repo=CaseLineItemRepository(sb),
             doc_link_repo=CaseDocumentLinkRepository(sb),
             audit_repo=self.audit_repo,
-            policy_path="app/policies/sense_policy_mvp_v1.yaml",  # <-- adjust
+            policy_path="app/policies/sense_policy_mvp_v1.yaml",
+            # NOTE: for doc_type presence later, inject header_repo via your DecisionRunService enhancement
         )
 
-    def _safe_init(self, cls, sb):
+        self.header_repo = DocumentHeaderRepository(sb)
+        self.link_repo = CaseDocumentLinkRepository(sb)
+
+    def _safe_construct(self, cls, sb):
+        # Supports:
+        # - __init__(self, sb)
+        # - __init__(self, *, sb)
+        # - __init__(self)
         try:
             return cls(sb)
         except TypeError:
-            return cls()
-        
-    def _safe_init(self, cls, sb):
-        """
-        Supports both constructor styles:
-        - __init__(self)
-        - __init__(self, sb)
-        """
-        try:
-            return cls(sb)
-        except TypeError:
-            return cls()
+            try:
+                return cls(sb=sb)
+            except TypeError:
+                return cls()
 
     def run(
         self,
@@ -83,129 +76,81 @@ class CaseProcessingService:
         domain: str,
         actor_id: str = "SYSTEM",
     ) -> Dict[str, Any]:
-
-        run_id = f"pipeline:{datetime.now(timezone.utc).isoformat()}"
+        pipeline_run_id = f"pipeline:{datetime.now(timezone.utc).isoformat()}"
 
         self.audit_repo.emit(
             case_id=case_id,
             event_type="PIPELINE_STARTED",
             actor=actor_id,
-            payload={"run_id": run_id, "domain": domain},
+            payload={"run_id": pipeline_run_id, "domain": domain},
         )
 
         try:
             # ----------------------------
             # 1) DISCOVERY
             # ----------------------------
-             #self._update_status(case_id, "DISCOVERING")
-
-            discovery_result = self.discovery_service.discover(
-                case_id=case_id,
-                actor_id=actor_id,
-            )
-
-             #self._update_status(case_id, "DISCOVERED")
-
+            print("1.DISCOVERY Started")
+            discovery_result = self.discovery_service.discover(case_id=case_id, actor_id=actor_id)
+            
             # ----------------------------
             # 2) EVIDENCE EXTRACT
             # ----------------------------
-             #self._update_status(case_id, "EVIDENCE_EXTRACTING")
-
-            extract_result = self.extract_service.extract(
-                case_id=case_id,
-                actor_id=actor_id,
-            )
-
-             #self._update_status(case_id, "EVIDENCE_EXTRACTED")
-
+            print("2.EVIDENCE EXTRACT Started")
+            extract_result = self.extract_service.extract(case_id=case_id, actor_id=actor_id)
+            
             # ----------------------------
             # 3) EVIDENCE GROUP
             # ----------------------------
-             #self._update_status(case_id, "EVIDENCE_GROUPING")
-
-            group_result = self.group_service.group_case(
-                case_id=case_id
-            )
-
-             #self._update_status(case_id, "EVIDENCE_GROUPED")
-
+            print("3.EVIDENCE GROUP Started")
+            group_result = self.group_service.group_case(case_id=case_id)
+            
             # ----------------------------
             # 4) FACT DERIVE
             # ----------------------------
-             #self._update_status(case_id, "FACTS_DERIVING")
-
-            fact_result = self.fact_service.derive(
-                case_id=case_id,actor_id=actor_id
-            )
-
-             #self._update_status(case_id, "FACTS_DERIVED")
-
+            print("4.FACT DERIVE Started")
+            fact_result = self.fact_service.derive(case_id=case_id, actor_id=actor_id)
+            
             # ----------------------------
             # 5) DECISION SELECTION
             # ----------------------------
-             #self._update_status(case_id, "DECISION_SELECTING")
-
-            selection_result = self.selection_service.select_for_case(
-                case_id=case_id,
-                domain_code=domain
-            )
-
-             #self._update_status(case_id, "DECISION_SELECTED")
-
+            print("5.Technical Selection Started")
+            selection_result = self.selection_service.select_for_case(case_id=case_id, domain_code=domain)
+            
             # ----------------------------
             # 6) DECISION RUN
             # ----------------------------
-             #self._update_status(case_id, "DECISION_RUNNING")
-             
-    
-
+            print("6.Decision Run Started")
             decision_result = self.decision_service.run_case(
                 case_id=case_id,
                 domain_code=domain,
                 selection=selection_result,
-                created_by=actor_id
+                created_by=actor_id,
             )
-                
-    
-             #self._update_status(case_id, "DECISION_COMPLETED")
 
             self.audit_repo.emit(
                 case_id=case_id,
                 event_type="PIPELINE_COMPLETED",
                 actor=actor_id,
-                payload={"run_id": run_id},
+                payload={"run_id": pipeline_run_id},
             )
 
             return {
                 "case_id": case_id,
-                "run_id": run_id,
                 "domain": domain,
-                "steps": {
-                    "discovery": discovery_result,
-                    "extract": extract_result,
-                    "group": group_result,
-                    "facts": fact_result,
-                    "selection": selection_result,
-                    "decision": decision_result,
-                },
-                "status": "SUCCESS",
+                "pipeline_run_id": pipeline_run_id,
+                "discovery": discovery_result,
+                "extract": extract_result,
+                "group": group_result,
+                "facts": fact_result,
+                "selection": selection_result,
+                "decision": decision_result,
             }
 
         except Exception as e:
-
-             #self._update_status(case_id, "FAILED")
-
             self.audit_repo.emit(
                 case_id=case_id,
                 event_type="PIPELINE_FAILED",
                 actor=actor_id,
-                payload={
-                    "run_id": run_id,
-                    "error": str(e),
-                },
+                payload={"run_id": pipeline_run_id, "error": str(e)},
             )
-
             raise
-
-    def _update_status(self, case_id: str, status: str):
-        self.case_repo.update_status(case_id, status)

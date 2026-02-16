@@ -224,3 +224,29 @@ class DocumentHeaderRepository(BaseRepository):
             .execute()
         )
         return getattr(r, "data", None) or []
+    
+    # -----------------------------
+    # REQUIRED for locked design:
+    # doc_type lives here
+    # -----------------------------
+    def list_header_by_document_ids(self, document_ids: List[str]) -> List[Dict[str, Any]]:
+        ids = [str(x) for x in (document_ids or []) if x]
+        if not ids:
+            return []
+
+        # If multiple headers exist per document_id, we want the latest.
+        # Supabase can't "distinct on" easily from client; so we fetch ordered and pick first per doc_id.
+        res = (
+            self.sb.table(self.TABLE)
+            .select("header_id,document_id,doc_type,doc_title,doc_number,language,effective_from,effective_to,parties,extraction_method,confidence,created_at")
+            .in_("document_id", ids)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        rows = res.data or []
+        latest: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            did = str(r.get("document_id") or "")
+            if did and did not in latest:
+                latest[did] = r
+        return list(latest.values())
