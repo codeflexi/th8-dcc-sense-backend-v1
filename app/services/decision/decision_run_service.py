@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
@@ -110,6 +111,11 @@ class DecisionRunService:
             inputs_snapshot=inputs_snapshot,
         )
         run_id = str(run["run_id"])
+        
+        print("DOMAIN =", domain_code)
+        print("POLICY DOMAINS =", list(self.policy.get("domains", {}).keys()))
+        print("CALCS KEYS =", list(self.policy.get("domains", {}).get(domain_code, {}).get("calculations", {}).keys()))
+
 
         self._audit_emit(
             case_id=case_id,
@@ -315,6 +321,8 @@ class DecisionRunService:
 
         try:
             calc_defs = self._get_required_calcs(domain_code)
+            print("CALC_DEFS_RAW =", calc_defs)
+            
             if calc_defs and CalculationService:
                 defaults = (self.policy.get("meta") or {}).get("defaults") or {}
                 rounding = defaults.get("rounding") or {}
@@ -330,6 +338,7 @@ class DecisionRunService:
                 calc_result = calc_engine.compute_all(calcs=calc_defs, ctx=calc_context, rounding=rounding)
 
                 calculated = self._json_safe(getattr(calc_result, "values", {}) or {})
+                print("CALCULATED_VALUES =", calculated)
                 calc_trace = getattr(calc_result, "trace", []) or []
 
         except Exception as e:
@@ -349,6 +358,8 @@ class DecisionRunService:
             "calculated": calculated,
             "ap": (sel or {}).get("ap_context") or {},
         }
+
+        self._active_fmt_ctx = rule_ctx
 
         for rule in self._iter_rules(domain_code):
             rt = self._eval_rule(
@@ -403,6 +414,7 @@ class DecisionRunService:
                     "selection_refs": self._refs_from_selection(sel),
                 },
                 "calculations": {"values": calculated, "trace": calc_trace, "error": calc_error},
+                "explainability": self._build_explainability_pack(po_line=po_line, sel=sel, calculated=calculated, rule_ctx=rule_ctx),
                 "rules": rule_traces,
             }
         )
@@ -767,7 +779,48 @@ class DecisionRunService:
 
     # =====================================================
     # Trace helpers
+    # ===========================================
     # =====================================================
+    # Explainability helpers (Enterprise)
+    # =====================================================
+    def _format_explanation_obj(self, explanation: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(explanation, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for k, v in explanation.items():
+            if isinstance(v, str):
+                out[k] = self._format_template(v, ctx)
+            else:
+                out[k] = v
+        return out
+
+    def _format_template(self, template: str, ctx: Dict[str, Any]) -> str:
+        if not template or "{" not in template:
+            return template or ""
+        # Replace {path.like.this} tokens using ctx resolver.
+        def repl(m):
+            token = (m.group(1) or "").strip()
+            if not token:
+                return m.group(0)
+            val = self._resolve_token(ctx, token)
+            if val is None:
+                return m.group(0)
+            return str(val)
+        return re.sub(r"\{([^{}]+)\}", repl, template)
+
+    def _resolve_token(self, ctx: Dict[str, Any], token: str) -> Any:
+        # Support both dot paths (ap.sku) and flat calculated fields (variance_pct)
+        if "." in token:
+            return self._resolve_path(ctx, "$" + token)
+        # Flat field: try calculated first, then ctx root
+        if isinstance(ctx, dict):
+            calc = ctx.get("calculated") if isinstance(ctx.get("calculated"), dict) else {}
+            if isinstance(calc, dict) and token in calc:
+                return calc.get(token)
+            if token in ctx:
+                return ctx.get(token)
+        return None
+
     def _trace(
         self,
         rule: Dict[str, Any],
@@ -775,6 +828,7 @@ class DecisionRunService:
         calculation: Dict[str, Any],
         fail_actions: List[Dict[str, Any]],
         extra: Optional[Dict[str, Any]] = None,
+        fmt_ctx: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         out = {
             "rule_id": rule.get("rule_id"),
@@ -784,11 +838,76 @@ class DecisionRunService:
             "result": result,
             "calculation": calculation,
             "fail_actions": fail_actions,
-            "explanation": rule.get("explanation") or {},
+            "explanation": self._format_explanation_obj(rule.get("explanation") or {}, fmt_ctx or getattr(self, "_active_fmt_ctx", {}) or {}),
         }
         if extra:
             out["extra"] = extra
         return out
+    def _build_explainability_pack(
+        self,
+        *,
+        po_line: Optional[Dict[str, Any]],
+        sel: Optional[Dict[str, Any]],
+        calculated: Dict[str, Any],
+        rule_ctx: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ap = (sel or {}).get("ap_context") or {}
+        sku = ap.get("sku") or (po_line or {}).get("sku")
+        qty_po = ap.get("qty_po")
+        qty_gr = ap.get("qty_gr")
+        qty_inv = ap.get("qty_inv")
+        over_gr = ap.get("over_gr_qty")
+        over_inv = ap.get("over_inv_qty")
+
+        po_price = ap.get("po_unit_price")
+        inv_price = ap.get("inv_unit_price")
+
+        def dec(x):
+            try:
+                return Decimal(str(x))
+            except Exception:
+                return None
+
+        po_p = dec(po_price)
+        inv_p = dec(inv_price)
+        price_diff_abs = None
+        price_diff_pct = None
+        if po_p is not None and inv_p is not None:
+            price_diff_abs = inv_p - po_p
+            if po_p != 0:
+                price_diff_pct = (price_diff_abs / po_p) * Decimal("100")
+
+        pack = {
+            "sku": sku,
+            "item": {
+                "item_id": (po_line or {}).get("item_id"),
+                "item_name": (po_line or {}).get("item_name") or (po_line or {}).get("name"),
+                "description": (po_line or {}).get("description"),
+                "uom": (po_line or {}).get("uom"),
+            },
+            "qty": {
+                "po": qty_po,
+                "gr": qty_gr,
+                "inv": qty_inv,
+                "over_gr_qty": over_gr,
+                "over_inv_qty": over_inv,
+            },
+            "price": {
+                "po_unit_price": po_price,
+                "inv_unit_price": inv_price,
+                "diff_abs": str(price_diff_abs) if price_diff_abs is not None else None,
+                "diff_pct": str(price_diff_pct) if price_diff_pct is not None else None,
+                "tolerance_abs": self._resolve_path(rule_ctx, "$meta.defaults.tolerances.price_abs"),
+            },
+            "flags": {
+                "dup_invoice": ap.get("dup_flag"),
+                "inv_without_gr": ap.get("inv_without_gr_flag"),
+            },
+            "calculated": calculated,
+        }
+
+        return self._json_safe(pack)
+
 
     # =====================================================
     # Policy shape helpers

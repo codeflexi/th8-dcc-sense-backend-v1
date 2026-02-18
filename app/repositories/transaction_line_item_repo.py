@@ -59,3 +59,48 @@ class TransactionLineItemRepository:
             except Exception:
                 continue
         return total
+
+    def list_by_transaction(self, *, transaction_id: str, entity_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        q = self.sb.table(self.TABLE).select("*").eq("transaction_id", transaction_id)
+        if entity_id:
+            q = q.eq("entity_id", entity_id)
+        res = q.execute()
+        return res.data or []
+
+    def list_by_transaction_and_source(
+        self,
+        *,
+        transaction_id: str,
+        source_type: str,
+        entity_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        q = (
+            self.sb.table(self.TABLE)
+            .select("*")
+            .eq("transaction_id", transaction_id)
+            .eq("source_type", source_type)
+        )
+        if entity_id:
+            q = q.eq("entity_id", entity_id)
+        res = q.execute()
+        return res.data or []
+
+    def list_by_transaction_and_sources(
+        self,
+        *,
+        transaction_id: str,
+        source_types: List[str],
+        entity_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        # Supabase .in_() exists; keep defensive fallback
+        try:
+            q = self.sb.table(self.TABLE).select("*").eq("transaction_id", transaction_id).in_("source_type", source_types)
+            if entity_id:
+                q = q.eq("entity_id", entity_id)
+            res = q.execute()
+            return res.data or []
+        except Exception:
+            out: List[Dict[str, Any]] = []
+            for t in source_types or []:
+                out.extend(self.list_by_transaction_and_source(transaction_id=transaction_id, source_type=t, entity_id=entity_id))
+            return out

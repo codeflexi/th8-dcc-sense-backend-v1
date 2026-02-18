@@ -69,6 +69,48 @@ domains:
         output:
           field: "contract_breach"
 
+    techniques:
+      - id: T_CONTRACT_MIN_PRICE
+        category: BASELINE
+        description: Use minimum contract price as baseline
+        required_facts: [CONTRACT_PRICE]
+        gates:
+          currency_match: true
+          min_confidence:
+            evidence_type: PRICE
+            threshold: 0.75
+
+      - id: T_CONTRACT_DIRECT_PRICE
+        category: BASELINE
+        description: Use direct contract price as baseline
+        required_facts: [CONTRACT_PRICE]
+        gates:
+          currency_match: true
+          min_confidence:
+            evidence_type: PRICE
+            threshold: 0.70
+
+      - id: T_LAST_OBSERVED_PRICE
+        category: BASELINE
+        description: Use last observed purchase price as baseline
+        required_facts: [LAST_PRICE]
+        gates:
+          currency_match: true
+
+      - id: T_MEDIAN_12M_PRICE
+        category: BASELINE
+        description: Use median price of last 12 months as baseline
+        required_facts: [MEDIAN_12M_PRICE]
+        gates:
+          currency_match: true
+
+      - id: T_NO_BASELINE_ESCALATE
+        category: FALLBACK
+        description: No reliable baseline available
+        outcome:
+          readiness_flag: baseline_available=false
+          required_action: REVIEW
+
     rules:
       - rule_id: P-PRICE-01
         group: PRICE
@@ -82,10 +124,11 @@ domains:
           field: variance_pct
           operator: ">"
           value: 3
-        fail_actions: [REVIEW]
+        fail_actions:
+          - REVIEW
         explanation:
           exec: "ราคาขอซื้อสูงกว่าราคาฐานเกินเกณฑ์"
-          audit: "PO variance {variance_pct}% exceeds threshold"
+          audit: "PO variance {variance_pct}% exceeds threshold 3%"
 
       - rule_id: P-CONTRACT-01
         group: PRICE
@@ -99,7 +142,8 @@ domains:
           field: contract_breach
           operator: "=="
           value: true
-        fail_actions: [REVIEW]
+        fail_actions:
+          - REVIEW
         explanation:
           exec: "ราคาซื้อสูงกว่าราคาตามสัญญา"
           audit: "PO price exceeds contract baseline"
@@ -113,137 +157,129 @@ domains:
         logic:
           type: document_presence
           required_docs: [CONTRACT, QUOTATION]
-        fail_actions: [REVIEW]
+        fail_actions:
+          - REVIEW
         explanation:
           exec: "เอกสารจัดซื้อไม่ครบ"
           audit: "Missing required documents: {missing_docs}"
 
+domains:
   finance_ap:
-    description: Finance AP 3-Way Matching
-    profile: {}
+    domain_id: FINANCE_AP
+    title: "Finance AP 3-Way Matching"
 
     calculations:
-      gr_exceeds_po:
-        description: GR qty exceeds PO qty
-        unit: BOOLEAN
+      A-CALC-01:
+        calc_id: A-CALC-01
+        output_field: gr_exceeds_po
         formula_id: GT
         inputs:
           left_value: "$ap.over_gr_qty"
           right_value: 0
-        output:
-          field: "gr_exceeds_po"
 
-      inv_exceeds_gr:
-        description: Invoice qty exceeds GR qty
-        unit: BOOLEAN
+      A-CALC-02:
+        calc_id: A-CALC-02
+        output_field: inv_exceeds_gr
         formula_id: GT
         inputs:
           left_value: "$ap.over_inv_qty"
           right_value: 0
-        output:
-          field: "inv_exceeds_gr"
 
-      inv_without_gr:
-        description: Invoice exists but no GR
-        unit: BOOLEAN
+      A-CALC-03:
+        calc_id: A-CALC-03
+        output_field: inv_without_gr
         formula_id: GT
         inputs:
           left_value: "$ap.inv_without_gr_flag"
           right_value: 0
-        output:
-          field: "inv_without_gr"
 
-      dup_invoice:
-        description: Duplicate invoice flag (deterministic)
-        unit: BOOLEAN
+      A-CALC-04:
+        calc_id: A-CALC-04
+        output_field: dup_invoice
         formula_id: GT
         inputs:
           left_value: "$ap.dup_flag"
           right_value: 0
-        output:
-          field: "dup_invoice"
 
-      price_within_tolerance:
-        description: Invoice unit price within tolerance of PO unit price
-        unit: BOOLEAN
+      A-CALC-05:
+        calc_id: A-CALC-05
+        output_field: price_within_tolerance
         formula_id: ABS_DIFF_LTE
         inputs:
           left_value: "$ap.inv_unit_price"
           right_value: "$ap.po_unit_price"
           expected_value: "$meta.defaults.tolerances.price_abs"
-        output:
-          field: "price_within_tolerance"
 
     rules:
       - rule_id: A-QTY-01
         group: QUANTITY
         severity: HIGH
-        uses: ["gr_exceeds_po"]
+        explanation:
+          exec: "ยอดรับของมากกว่ายอด PO"
+          audit: "GR exceeds PO sku={ap.sku} (qty_gr={ap.qty_gr}, qty_po={ap.qty_po}, over_gr_qty={ap.over_gr_qty})"
         logic:
           type: compare
           field: gr_exceeds_po
           operator: "=="
           value: false
-        fail_actions: [{type: REVIEW}]
-        explanation:
-          exec: "ยอดรับของมากกว่ายอด PO"
-          audit: "GR exceeds PO sku={ap.sku} (qty_gr={ap.qty_gr}, qty_po={ap.qty_po}, over_gr_qty={ap.over_gr_qty})"
+        fail_actions:
+          - type: REVIEW
 
       - rule_id: A-QTY-02
         group: QUANTITY
         severity: HIGH
-        uses: ["inv_exceeds_gr"]
+        explanation:
+          exec: "ยอดใบแจ้งหนี้มากกว่ายอดรับของ"
+          audit: "INV exceeds GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr}, over_inv_qty={ap.over_inv_qty})"
         logic:
           type: compare
           field: inv_exceeds_gr
           operator: "=="
           value: false
-        fail_actions: [{type: REVIEW}]
-        explanation:
-          exec: "ยอดใบแจ้งหนี้มากกว่ายอดรับของ"
-          audit: "INV exceeds GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr}, over_inv_qty={ap.over_inv_qty})"
+        fail_actions:
+          - type: REVIEW
 
       - rule_id: A-PROCESS-01
         group: PROCESS
         severity: CRITICAL
-        uses: ["inv_without_gr"]
+        explanation:
+          exec: "มีใบแจ้งหนี้แต่ยังไม่มีใบรับของ (GRN)"
+          audit: "Invoice without GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr})"
         logic:
           type: compare
           field: inv_without_gr
           operator: "=="
           value: false
-        fail_actions: [{type: ESCALATE}]
-        explanation:
-          exec: "มีใบแจ้งหนี้แต่ยังไม่มีใบรับของ (GRN)"
-          audit: "Invoice without GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr})"
+        fail_actions:
+          - type: ESCALATE
 
       - rule_id: A-PRICE-01
         group: PRICE
         severity: HIGH
-        uses: ["price_within_tolerance"]
+        explanation:
+          exec: "ราคาใบแจ้งหนี้ไม่ตรงกับ PO"
+          audit: "Price mismatch sku={ap.sku} (inv={ap.inv_unit_price}, po={ap.po_unit_price}, tol_abs={meta.defaults.tolerances.price_abs})"
         logic:
           type: compare
           field: price_within_tolerance
           operator: "=="
           value: true
-        fail_actions: [{type: REVIEW}]
-        explanation:
-          exec: "ราคาใบแจ้งหนี้ไม่ตรงกับ PO"
-          audit: "Price mismatch sku={ap.sku} (inv={ap.inv_unit_price}, po={ap.po_unit_price}, tol_abs={meta.defaults.tolerances.price_abs})"
+        fail_actions:
+          - type: REVIEW
 
       - rule_id: A-FRAUD-01
         group: FRAUD
         severity: HIGH
-        uses: ["dup_invoice"]
+        explanation:
+          exec: "พบใบแจ้งหนี้ซ้ำ"
+          audit: "Duplicate invoice (vendor={ap.vendor_id}, invoice={ap.invoice_number}, fp={ap.invoice_fp})"
         logic:
           type: compare
           field: dup_invoice
           operator: "=="
           value: false
-        fail_actions: [{type: REVIEW}]
-        explanation:
-          exec: "พบใบแจ้งหนี้ซ้ำ"
-          audit: "Duplicate invoice (vendor={ap.vendor_id}, invoice={ap.invoice_number}, fp={ap.invoice_fp})"
+        fail_actions:
+          - type: REVIEW
 
 decision_logic:
   outcomes:

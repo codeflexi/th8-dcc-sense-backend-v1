@@ -1,12 +1,15 @@
 # app/services/transactions/transaction_ingestion_service.py
 from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from app.repositories.audit_repo import AuditRepository
 from app.repositories.entity_repo import EntityRepository
 from app.repositories.transaction_repo import TransactionRepository
 from app.repositories.transaction_line_item_repo import TransactionLineItemRepository
 from app.repositories.case_repo_ext import CaseRepositoryExt
+from app.repositories.case_line_item_repo import CaseLineItemRepository
 
 
 class TransactionIngestionService:
@@ -17,6 +20,7 @@ class TransactionIngestionService:
         self.txn_repo = TransactionRepository(sb)
         self.ledger_repo = TransactionLineItemRepository(sb)
         self.case_repo = CaseRepositoryExt(sb)
+        self.case_line_repo = CaseLineItemRepository(sb)
 
     # ----------------------------
     # GRN ingestion (PO-led only)
@@ -165,7 +169,17 @@ class TransactionIngestionService:
             entity_id=entity_id,
         ):
             # ledger exists but case missing => create case anyway (repair path)
-            case_detail = self._build_case_detail(entity_id=entity_id, txn=txn, mismatch=mismatch)
+            base_case_detail = self._build_case_detail(entity_id=entity_id, txn=txn, mismatch=mismatch)
+            case_detail = self._merge_case_detail(
+                base_case_detail,
+                {
+                    "vendor_id": entity_id,
+                    "invoice_number": invoice_number,
+                    "po_number": po_number,
+                    "transaction_id": txn["transaction_id"],
+                },
+            )
+
             created_case = self.case_repo.create_finance_ap_case(
                 transaction_id=txn["transaction_id"],
                 entity_id=entity_id,
@@ -175,6 +189,16 @@ class TransactionIngestionService:
                 created_by=actor_id,
                 case_detail=case_detail,
             )
+
+            # 🔥 Ensure dcc_case_line_items exists for finance_ap (repair path)
+            self._ensure_finance_case_line_items(
+                case_id=created_case.get("case_id"),
+                transaction_id=txn["transaction_id"],
+                invoice_number=invoice_number,
+                currency=currency,
+                lines=lines,  # may be empty; will fallback to ledger read
+            )
+
             self._emit_audit_safe(
                 case_id=created_case.get("case_id"),
                 event_type="FINANCE_CASE_CREATED_FROM_EXISTING_LEDGER",
@@ -205,7 +229,17 @@ class TransactionIngestionService:
         inserted = self._insert_ledger_rows_idempotent(rows)
 
         # Create finance_ap case
-        case_detail = self._build_case_detail(entity_id=entity_id, txn=txn, mismatch=mismatch)
+        base_case_detail = self._build_case_detail(entity_id=entity_id, txn=txn, mismatch=mismatch)
+        case_detail = self._merge_case_detail(
+            base_case_detail,
+            {
+                "vendor_id": entity_id,
+                "invoice_number": invoice_number,
+                "po_number": po_number,
+                "transaction_id": txn["transaction_id"],
+            },
+        )
+
         created_case = self.case_repo.create_finance_ap_case(
             transaction_id=txn["transaction_id"],
             entity_id=entity_id,
@@ -214,6 +248,15 @@ class TransactionIngestionService:
             currency=currency,
             created_by=actor_id,
             case_detail=case_detail,
+        )
+
+        # 🔥 CRITICAL FIX: seed dcc_case_line_items for finance_ap
+        self._ensure_finance_case_line_items(
+            case_id=created_case.get("case_id"),
+            transaction_id=txn["transaction_id"],
+            invoice_number=invoice_number,
+            currency=currency,
+            lines=lines,
         )
 
         self._emit_audit_safe(
@@ -273,6 +316,112 @@ class TransactionIngestionService:
                 }
             ],
         }
+
+    def _merge_case_detail(self, base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(base or {})
+        for k, v in (patch or {}).items():
+            if v is not None:
+                out[k] = v
+        return out
+
+    def _case_has_line_items(self, case_id: str) -> bool:
+        try:
+            res = (
+                self.sb.table("dcc_case_line_items")
+                .select("item_id")
+                .eq("case_id", case_id)
+                .limit(1)
+                .execute()
+            )
+            data = getattr(res, "data", None) or []
+            return bool(data)
+        except Exception:
+            return False
+
+    def _fetch_invoice_ledger_lines_best_effort(
+        self,
+        *,
+        transaction_id: str,
+        invoice_number: str,
+    ) -> List[Dict[str, Any]]:
+        # fallback when caller didn't supply lines
+        try:
+            res = (
+                self.sb.table("dcc_transaction_line_items")
+                .select("*")
+                .eq("transaction_id", transaction_id)
+                .eq("source_type", "INVOICE")
+                .eq("source_ref_id", invoice_number)
+                .execute()
+            )
+            return getattr(res, "data", None) or []
+        except Exception:
+            return []
+
+    def _ensure_finance_case_line_items(
+        self,
+        *,
+        case_id: Optional[str],
+        transaction_id: str,
+        invoice_number: str,
+        currency: str,
+        lines: List[Dict[str, Any]],
+    ) -> None:
+        if not case_id:
+            return
+
+        # idempotent: don't insert twice
+        if self._case_has_line_items(case_id):
+            return
+
+        src_lines = lines or []
+        if not src_lines:
+            src_lines = self._fetch_invoice_ledger_lines_best_effort(
+                transaction_id=transaction_id,
+                invoice_number=invoice_number,
+            )
+
+        items: List[Dict[str, Any]] = []
+        for i, ln in enumerate(src_lines or []):
+            sku = ln.get("sku")
+            if not sku:
+                continue
+
+            qty = ln.get("quantity")
+            unit_price = ln.get("unit_price")
+
+            # total_price uses existing amount if present; else compute
+            total_price = ln.get("amount")
+            if total_price is None:
+                try:
+                    total_price = float(qty or 0) * float(unit_price or 0)
+                except Exception:
+                    total_price = None
+
+            items.append(
+                {
+                    "item_id": str(uuid4()),
+                    "case_id": case_id,
+                    "sku": sku,
+                    "item_name": ln.get("item_name"),
+                    "description": ln.get("description"),
+                    "quantity": qty,
+                    "unit_price": unit_price,
+                    "currency": (ln.get("currency") or currency),
+                    "total_price": total_price,
+                    "uom": ln.get("uom"),
+                    "source_line_ref": ln.get("source_line_ref") or ln.get("line_ref") or str(i + 1),
+                }
+            )
+
+        if not items:
+            return
+
+        try:
+            self.case_line_repo.bulk_insert(items)
+        except Exception:
+            # best-effort: do not fail ingestion
+            return
 
     def _build_ledger_rows(
         self,

@@ -10,6 +10,7 @@ from app.repositories.case_document_link_repo import CaseDocumentLinkRepository
 from app.services.case.case_decision_summary_service import CaseDecisionSummaryService
 from app.services.case.case_group_service import CaseGroupService
 from app.services.case.case_processing_run_service import CaseProcessingRunService
+from app.repositories.case_decision_result_repo import CaseDecisionResultRepository
 
 
 from typing import Dict, Any, List
@@ -169,7 +170,29 @@ def get_case_decision_summary(request: Request, case_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-    
+@router.get("/cases/{case_id}/decision-results")
+def get_case_decision_results(
+    case_id: str,
+    request: Request,
+    run_id: str | None = None,
+):
+    sb = request.state.sb
+
+    repo = CaseDecisionResultRepository(sb)
+
+    results = repo.list_by_case(
+        case_id=case_id,
+        run_id=run_id,
+    )
+
+    return {
+        "case_id": case_id,
+        "run_id": run_id,
+        "count": len(results),
+        "results": results,
+    }
+
+ 
 @router.get(
     "/cases/{case_id}/groups",
     summary="Audit-grade group drill-down"

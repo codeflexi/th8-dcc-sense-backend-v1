@@ -120,6 +120,17 @@ class CalculationService:
                 raise ValueError("GT invalid inputs")
             return bool(left > right)
 
+        if formula_id == "ABS_DIFF_LTE":
+            left = self._dec(inputs.get("left_value"))
+            right = self._dec(inputs.get("right_value"))
+            expected = self._dec(inputs.get("expected_value"))
+            if left is None or right is None or expected is None:
+                raise ValueError("ABS_DIFF_LTE invalid inputs")
+            diff = left - right
+            if diff < 0:
+                diff = diff * Decimal("-1")
+            return bool(diff <= expected)
+
         if formula_id == "THREE_WAY_MATCH":
             # Deterministic 3-way match (PO vs GRN vs Invoice)
             # Inputs expected:

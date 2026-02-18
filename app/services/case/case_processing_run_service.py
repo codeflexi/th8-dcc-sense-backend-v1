@@ -11,8 +11,10 @@ from app.services.discovery.discovery_service import DiscoveryService
 from app.services.evidence.evidence_extraction_service import EvidenceExtractionService
 from app.services.evidence.evidence_grouping_service import EvidenceGroupingService
 from app.services.fact.fact_derivation_service import FactDerivationService
+
 from app.services.decision.selection_service import SelectionService
 from app.services.decision.decision_run_service import DecisionRunService
+from app.services.orchestrators.orchestrator_registry import OrchestratorRegistry
 
 from app.repositories.decision_run_repo import DecisionRunRepository
 from app.repositories.case_decision_result_repo import CaseDecisionResultRepository
@@ -24,17 +26,16 @@ from app.repositories.document_header_repo import DocumentHeaderRepository
 
 class CaseProcessingRunService:
     """
-    Enterprise Orchestrator
-
+    Enterprise Orchestrator (LOCKED)
     Domains:
         - procurement  → document-driven
-        - finance_ap   → ledger-driven (no discovery)
+        - finance_ap   → ledger-driven
 
     Principles:
-        - Evidence preparation runs once (or when forced)
-        - Decision evaluation can re-run safely
-        - Audit trace is append-only
-        - Deterministic per domain
+        - No schema changes
+        - No ingestion redesign
+        - No frontend endpoint changes
+        - Domain separation via OrchestratorRegistry
     """
 
     def __init__(self, sb):
@@ -42,10 +43,13 @@ class CaseProcessingRunService:
         self.audit_repo = AuditRepository(sb)
         self.case_repo = CaseRepository(sb)
 
+        # Procurement preparation pipeline (unchanged)
         self.discovery_service = DiscoveryService(sb)
         self.extract_service = EvidenceExtractionService(sb=sb)
         self.group_service = EvidenceGroupingService(sb=sb)
         self.fact_service = FactDerivationService(sb=sb)
+
+        # Selection remains for procurement only (unchanged)
         self.selection_service = SelectionService(sb=sb)
 
         self.decision_service = DecisionRunService(
@@ -60,6 +64,9 @@ class CaseProcessingRunService:
 
         self.header_repo = DocumentHeaderRepository(sb)
         self.link_repo = CaseDocumentLinkRepository(sb)
+
+        # Domain orchestrators
+        self.orch_registry = OrchestratorRegistry(sb)
 
     # =====================================================
     # PUBLIC ENTRYPOINT
@@ -87,43 +94,46 @@ class CaseProcessingRunService:
         )
 
         try:
+            domain_key = (domain or "").strip().lower()
 
             # -------------------------------------------------
-            # DOMAIN ROUTING
+            # Domain Orchestrator (LOCKED)
             # -------------------------------------------------
+            orch = self.orch_registry.get(domain_key)
+            orch_out = orch.prepare_context(
+                case_id=case_id,
+                actor_id=actor_id,
+                force_prepare=force_prepare,
+            )
 
-            if domain.lower() == "procurement":
+            # -------------------------------------------------
+            # Procurement preparation phase (UNCHANGED behavior)
+            # -------------------------------------------------
+            prepare_result = None
+            if domain_key == "procurement":
                 prepare_result = self._prepare_case_if_needed(
                     case_id=case_id,
                     actor_id=actor_id,
                     force=force_prepare,
                 )
-                decision_result = self._evaluate_decision(
-                    case_id=case_id,
-                    domain=domain,
-                    actor_id=actor_id
-                )
 
-                response = {
-                    "prepare": prepare_result,
-                    "decision": decision_result,
-                }
+            # -------------------------------------------------
+            # Decision evaluation (all domains)
+            # - procurement uses SelectionService as before
+            # - finance_ap uses orchestrator selection_override
+            # -------------------------------------------------
+            decision_result = self._evaluate_decision(
+                case_id=case_id,
+                domain=domain_key,
+                actor_id=actor_id,
+                selection_override=orch_out.selection_override,
+            )
 
-            elif domain.lower() == "finance_ap":
-                # finance_ap is ledger-driven
-                decision_result = self._evaluate_decision(
-                    case_id=case_id,
-                    domain=domain,
-                    actor_id=actor_id
-                )
-
-                response = {
-                    "prepare": None,
-                    "decision": decision_result,
-                }
-
-            else:
-                raise ValueError(f"Unsupported domain: {domain}")
+            response = {
+                "prepare": prepare_result,
+                "decision": decision_result,
+                "orchestrator": orch_out.notes or {"domain": domain_key},
+            }
 
             self.audit_repo.emit(
                 case_id=case_id,
@@ -134,7 +144,7 @@ class CaseProcessingRunService:
 
             return {
                 "case_id": case_id,
-                "domain": domain,
+                "domain": domain_key,
                 "pipeline_run_id": pipeline_run_id,
                 **response,
             }
@@ -149,7 +159,7 @@ class CaseProcessingRunService:
             raise
 
     # =====================================================
-    # PROCUREMENT: PREPARATION PHASE
+    # PROCUREMENT: PREPARATION PHASE (UNCHANGED)
     # =====================================================
 
     def _prepare_case_if_needed(
@@ -174,24 +184,20 @@ class CaseProcessingRunService:
             }
 
         # 1) DISCOVERY
-        print("1.DISCOVERY Run")
         discovery_result = self.discovery_service.discover(
             case_id=case_id,
             actor_id=actor_id,
         )
 
-        print("2.EVIDENT EXTRACT Run")
         # 2) EXTRACT
         extract_result = self.extract_service.extract(
             case_id=case_id,
             actor_id=actor_id,
         )
 
-        print("3.EVIDENT GROUP Run")
         # 3) GROUP
         group_result = self.group_service.group_case(case_id=case_id)
 
-        print("4.DERIVE Run")
         # 4) DERIVE
         fact_result = self.fact_service.derive(
             case_id=case_id,
@@ -222,30 +228,26 @@ class CaseProcessingRunService:
         case_id: str,
         domain: str,
         actor_id: str,
-       
+        selection_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
 
-        # 1) SELECTION (only meaningful for procurement)
-        selection_result = self.selection_service.select_for_case(
-            case_id=case_id,
-            domain_code=domain,
-        )
+        # 1) SELECTION
+        # procurement: use SelectionService (existing)
+        # finance_ap: selection comes from LedgerOrchestrator
+        if selection_override is not None:
+            selection_result = selection_override
+        else:
+            selection_result = self.selection_service.select_for_case(
+                case_id=case_id,
+                domain_code=domain,
+            )
 
-        # 2) DECISION RUN
+        # 2) DECISION RUN (unchanged API)
         decision_result = self.decision_service.run_case(
             case_id=case_id,
             domain_code=domain,
             selection=selection_result,
             created_by=actor_id
         )
-
-        # # 3) OFFICIAL MODE → update case header decision
-        # if mode.upper() == "OFFICIAL":
-        #     self.case_repo.update_decision(
-        #         case_id=case_id,
-        #         decision=decision_result.get("decision"),
-        #         risk_level=decision_result.get("risk_level"),
-        #         confidence_score=decision_result.get("confidence_score"),
-        #     )
 
         return decision_result

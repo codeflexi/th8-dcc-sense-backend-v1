@@ -111,3 +111,54 @@ class CaseDecisionResultRepository(BaseRepository):
         )
 
         return res.data[0] if res.data else None
+    
+        # =========================================================
+    # Enterprise: list decision results by case (+ optional run)
+    # =========================================================
+    def list_by_case(
+        self,
+        *,
+        case_id: str,
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+
+        # 1️⃣ หา run_id ทั้งหมดของ case นี้ก่อน
+        run_query = (
+            self.sb
+            .table(self.RUN_TABLE)
+            .select("run_id")
+            .eq("case_id", case_id)
+        )
+
+        if run_id:
+            run_query = run_query.eq("run_id", run_id)
+
+        run_res = run_query.execute()
+        run_ids = [r["run_id"] for r in (run_res.data or [])]
+
+        if not run_ids:
+            return []
+
+        # 2️⃣ ดึง results จาก run_ids เหล่านั้น
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .select("""
+                result_id,
+                run_id,
+                group_id,
+                decision_status,
+                risk_level,
+                confidence,
+                reason_codes,
+                fail_actions,
+                trace,
+                evidence_refs,
+                created_at
+            """)
+            .in_("run_id", run_ids)
+            .order("created_at", desc=False)
+            .execute()
+        )
+
+        return res.data or []
