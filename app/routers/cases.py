@@ -12,10 +12,16 @@ from app.services.case.case_group_service import CaseGroupService
 from app.services.case.case_processing_run_service import CaseProcessingRunService
 from app.repositories.case_decision_result_repo import CaseDecisionResultRepository
 
+from app.services.result.decision_run_view_mapper  import to_decision_run_view_context
+from app.schemas.decision_run_view_model import DecisionRunViewContext
+from app.services.policy.registry import PolicyRegistry
+
 
 from typing import Dict, Any, List
 
 from app.services.case.case_service import CaseService
+import uuid
+
 
 
 
@@ -221,3 +227,39 @@ def process_case(
     )
 
     return result    
+
+async def _load_raw_decision_run(request: Request, case_id: str, run_id: str):
+
+    sb = request.state.sb
+    repo = CaseDecisionResultRepository(sb)
+    
+    _validate_uuid(case_id, "case_id")
+    _validate_uuid(run_id, "run_id")
+
+    results = repo.list_by_case(case_id=case_id, run_id=run_id)
+
+    return {
+        "case_id": case_id,
+        "run_id": run_id,
+        "count": len(results),
+        "results": results,
+    }
+
+   
+def _validate_uuid(v: str, name: str):
+    try:
+        uuid.UUID(str(v))
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} is not valid uuid: {v}"
+        )
+
+@router.get("/{case_id}/{run_id}/view", response_model=DecisionRunViewContext)
+async def get_decision_run_view(request: Request, case_id: str, run_id: str):
+
+    raw = await _load_raw_decision_run(request, case_id, run_id)
+
+    policy_registry = PolicyRegistry.get()
+
+    return to_decision_run_view_context(raw, policy_registry)

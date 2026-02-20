@@ -59,13 +59,14 @@ def create_app() -> FastAPI:
     def startup():
         # 1) Load policy
         policy = load_policy_from_file(
-            "app/policies/sense_policy_mvp.yaml"
+            "app/policies/sense_policy_mvp_v1.yaml"
         )
         PolicyRegistry.load(policy)
 
         print(
             f"[BOOT] Policy loaded: "
-            f"{policy.meta.policy_name} ({policy.meta.version})"
+            f"{policy.meta.policy_id} ({policy.meta.version})"
+
         )
 
         # 2) Initialize Supabase singleton (fail fast)
