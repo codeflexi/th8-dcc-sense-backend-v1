@@ -152,3 +152,86 @@ class CaseRepository(BaseRepository):
             .execute()
         )
         return res.data or []
+
+        # =====================================================
+    # Read – single case (with entity join)
+    # =====================================================
+    def get_with_entity(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Returns case joined with entity information.
+        Does NOT modify original get() for backward compatibility.
+        """
+
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .select(
+                """
+                *,
+                entity:dcc_entities(
+                    entity_id,
+                    entity_type,
+                    entity_code,
+                    entity_name,
+                    metadata
+                )
+                """
+            )
+            .eq("case_id", case_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not res.data:
+            return None
+
+        row = res.data[0]
+
+        entity = row.pop("entity", None)
+
+        if entity:
+            row["entity"] = {
+                "entity_id": entity.get("entity_id"),
+                "entity_type": entity.get("entity_type"),
+                "entity_code": entity.get("entity_code"),
+                "entity_name": entity.get("entity_name"),
+                "metadata": entity.get("metadata") or {},
+            }
+
+        return row
+    
+# =====================================================
+# Decision pointer update (enterprise minimal)
+# =====================================================
+
+    def update_after_run(
+        self,
+        case_id: str,
+        *,
+        run_id: str,
+        decision: str,
+        risk_level: str,
+        confidence: float,
+    ):
+        """
+        Update case pointer after successful decision run.
+
+        This does NOT trigger any decision logic.
+        Pure persistence layer.
+        """
+
+        res = (
+            self.sb
+            .table(self.TABLE)
+            .update({
+                "current_run_id": run_id,
+                "decision": decision,
+                "risk_level": risk_level,
+                "confidence_score": confidence,
+                "updated_at": "now()",
+            })
+            .eq("case_id", case_id)
+            .execute()
+        )
+
+        return res.data

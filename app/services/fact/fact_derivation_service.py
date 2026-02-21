@@ -108,17 +108,17 @@ class FactDerivationService:
                 self.fact_repo.upsert_fact({
                     "case_id": case_id,
                     "group_id": group_id,
-                    "fact_type": "CONTRACT_PRICE",
+                    "fact_type": "CONTRACT_MIN_PRICE",
                     "fact_key": fact_key,
                     "value": value,
                     "currency": currency,
                     "value_json": {
                         "price": value,
                         "currency": currency,
-                        "method": "MIN_CONTRACT_PRICE",
+                        "method": "CONTRACT_MIN",
                     },
                     "confidence": 0.95,
-                    "derivation_method": "MIN_CONTRACT_PRICE",
+                    "derivation_method": "CONTRACT_MIN",
                     "source_evidence_ids": evidence_ids,
                     "created_by": actor_id,
                 })
@@ -178,8 +178,10 @@ class FactDerivationService:
                 })
                 facts_created += 1
 
+        print ("FD_v2026_02_22_contract_min")
         return {
             "case_id": case_id,
             "status": "facts_derived",
             "facts_created": facts_created,
+            "debug_marker": "FD_v2026_02_22_contract_min",  # เพิ่มบรรทัดนี้
         }

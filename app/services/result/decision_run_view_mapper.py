@@ -215,7 +215,9 @@ def to_decision_run_view_context(
     policy_registry: PolicyRegistry,
 ) -> DecisionRunViewContext:
     results = raw.get("results") or []
+    
 
+    
     items: List[DecisionRunItemView] = []
 
     decision_list: List[str] = []

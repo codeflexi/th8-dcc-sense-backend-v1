@@ -1,14 +1,13 @@
 # =========================================================
 # TH8 Sense DCC — Policy YAML (Enterprise v1)
-# Contract tolerance = 5%
+# Multi-domain, deterministic, audit-ready
 # =========================================================
 
 meta:
   policy_id: TH8-Sense
-  version: v1.1
+  version: v1.0
   description: >
     Enterprise policy. Deterministic. Evidence-first. Multi-domain.
-
   defaults:
     currency: THB
     rounding:
@@ -20,7 +19,6 @@ meta:
       price_abs: 0
       price_pct: 0
       amount_pct: 0.0
-      contract_pct: 5
 
   discovery:
     min_relational_docs: 3
@@ -32,20 +30,10 @@ meta:
     vector_max_inferred_docs: 12
     contract_guard_mode: "STRICT"
 
-# =========================================================
-# DOMAINS
-# =========================================================
-
 domains:
 
-  # =========================================================
-  # PROCUREMENT
-  # =========================================================
-
   procurement:
-
     description: Procurement decision control
-
     profile:
       baseline_priority:
         - T_CONTRACT_MIN_PRICE
@@ -53,13 +41,16 @@ domains:
         - T_LAST_OBSERVED_PRICE
         - T_MEDIAN_12M_PRICE
         - T_NO_BASELINE_ESCALATE
-
     techniques:
 
+      # =========================================================
+      # CONTRACT — Minimum price across contract clauses
+      # =========================================================
       T_CONTRACT_MIN_PRICE:
         id: T_CONTRACT_MIN_PRICE
         category: BASELINE
-        description: Use minimum contractual price
+        description: >
+          Use minimum contractual price from active contract terms.
         required_facts:
           - CONTRACT_MIN_PRICE
         gates:
@@ -68,10 +59,14 @@ domains:
           baseline_from: CONTRACT_MIN_PRICE
           method_required: CONTRACT_MIN
 
+      # =========================================================
+      # CONTRACT — Direct matched SKU price
+      # =========================================================
       T_CONTRACT_DIRECT_PRICE:
         id: T_CONTRACT_DIRECT_PRICE
         category: BASELINE
-        description: Use direct contract price
+        description: >
+          Use direct contract price matched by SKU.
         required_facts:
           - CONTRACT_PRICE
         gates:
@@ -80,10 +75,14 @@ domains:
           baseline_from: CONTRACT_PRICE
           method_required: DIRECT_MATCH
 
+      # =========================================================
+      # LAST OBSERVED — Latest historical purchase price
+      # =========================================================
       T_LAST_OBSERVED_PRICE:
         id: T_LAST_OBSERVED_PRICE
         category: BASELINE
-        description: Use last observed price
+        description: >
+          Use last observed purchase price for same SKU.
         required_facts:
           - LAST_OBSERVED_PRICE
         gates:
@@ -92,10 +91,14 @@ domains:
           baseline_from: LAST_OBSERVED_PRICE
           method_required: LAST_OBSERVED
 
+      # =========================================================
+      # MEDIAN 12M — Historical median price
+      # =========================================================
       T_MEDIAN_12M_PRICE:
         id: T_MEDIAN_12M_PRICE
         category: BASELINE
-        description: Use 12M median price
+        description: >
+          Use 12-month rolling median historical price.
         required_facts:
           - MEDIAN_12M_PRICE
         gates:
@@ -104,15 +107,19 @@ domains:
           baseline_from: MEDIAN_12M_PRICE
           method_required: MEDIAN_12M
 
+      # =========================================================
+      # FALLBACK
+      # =========================================================
       T_NO_BASELINE_ESCALATE:
         id: T_NO_BASELINE_ESCALATE
         category: FALLBACK
-        description: No baseline found → escalate
+        description: >
+          No valid baseline found. Escalate for manual review.
 
+    
     calculations:
-
       variance_pct:
-        description: Percent variance between PO and baseline
+        description: Percent variance between PO unit price and baseline price
         unit: PERCENT
         formula_id: PCT_DIFF
         inputs:
@@ -126,7 +133,7 @@ domains:
           rounding: pct_decimals
 
       contract_breach:
-        description: PO price greater than baseline
+        description: PO price higher than baseline (contract)
         unit: BOOLEAN
         formula_id: GT
         inputs:
@@ -138,82 +145,61 @@ domains:
           field: "contract_breach"
 
     rules:
-
-      # ---------------------------------------------
-      # CONTRACT BREACH >5%
-      # ---------------------------------------------
-      - rule_id: P-CONTRACT-01
-        group: PRICE
-        severity: CRITICAL
-        description: Contract breach beyond 5% tolerance
-        preconditions:
-          baseline_available: true
-          baseline_source: CONTRACT_MIN_PRICE
-        uses:
-          - variance_pct
-        logic:
-          type: compare
-          field: variance_pct
-          operator: ">"
-          value: 5
-        fail_actions:
-          - REVIEW
-        explanation:
-          exec: "ราคาสูงกว่าสัญญาเกิน 5%"
-          audit: "Contract breach: variance {variance_pct}% > 5%"
-
-      # ---------------------------------------------
-      # NON-CONTRACT PRICE VARIANCE
-      # ---------------------------------------------
       - rule_id: P-PRICE-01
         group: PRICE
         severity: MED
-        description: Price variance vs non-contract baseline
+        description: Price variance vs selected baseline
         preconditions:
           baseline_available: true
-        uses:
-          - variance_pct
+        uses: ["variance_pct"]
         logic:
           type: compare
           field: variance_pct
           operator: ">"
           value: 3
-        fail_actions:
-          - REVIEW
+        fail_actions: [REVIEW]
         explanation:
-          exec: "ราคาสูงกว่าราคาฐานเกินเกณฑ์"
+          exec: "ราคาขอซื้อสูงกว่าราคาฐานเกินเกณฑ์"
           audit: "PO variance {variance_pct}% exceeds threshold"
 
-      # ---------------------------------------------
-      # DOCUMENT CHECK
-      # ---------------------------------------------
+      - rule_id: P-CONTRACT-01
+        group: PRICE
+        severity: HIGH
+        description: Contract price breach
+        preconditions:
+          baseline_source: CONTRACT_PRICE
+        uses: ["contract_breach"]
+        logic:
+          type: compare
+          field: contract_breach
+          operator: "=="
+          value: true
+        fail_actions: [REVIEW]
+        explanation:
+          exec: "ราคาซื้อสูงกว่าราคาตามสัญญา"
+          audit: "PO price exceeds contract baseline"
+
       - rule_id: P-DOC-01
         group: PROCESS
         severity: HIGH
-        description: Required procurement documents missing
+        description: Required procurement documents
+        preconditions: {}
+        uses: []
         logic:
           type: document_presence
-          required_docs:
-            - CONTRACT
-            - QUOTATION
-        fail_actions:
-          - REVIEW
+          required_docs: [CONTRACT, QUOTATION]
+        fail_actions: [REVIEW]
         explanation:
           exec: "เอกสารจัดซื้อไม่ครบ"
           audit: "Missing required documents: {missing_docs}"
 
-  # =========================================================
-  # FINANCE AP
-  # =========================================================
-
   finance_ap:
-
     description: Finance AP 3-Way Matching
     profile: {}
 
     calculations:
-
       gr_exceeds_po:
+        description: GR qty exceeds PO qty
         unit: BOOLEAN
         formula_id: GT
         inputs:
@@ -223,6 +209,7 @@ domains:
           field: "gr_exceeds_po"
 
       inv_exceeds_gr:
+        description: Invoice qty exceeds GR qty
         unit: BOOLEAN
         formula_id: GT
         inputs:
@@ -232,6 +219,7 @@ domains:
           field: "inv_exceeds_gr"
 
       inv_without_gr:
+        description: Invoice exists but no GR
         unit: BOOLEAN
         formula_id: GT
         inputs:
@@ -241,6 +229,7 @@ domains:
           field: "inv_without_gr"
 
       dup_invoice:
+        description: Duplicate invoice flag (deterministic)
         unit: BOOLEAN
         formula_id: GT
         inputs:
@@ -250,6 +239,7 @@ domains:
           field: "dup_invoice"
 
       price_within_tolerance:
+        description: Invoice unit price within tolerance of PO unit price
         unit: BOOLEAN
         formula_id: ABS_DIFF_LTE
         inputs:
@@ -260,7 +250,6 @@ domains:
           field: "price_within_tolerance"
 
     rules:
-
       - rule_id: A-QTY-01
         group: QUANTITY
         severity: HIGH
@@ -270,8 +259,10 @@ domains:
           field: gr_exceeds_po
           operator: "=="
           value: false
-        fail_actions:
-          - REVIEW
+        fail_actions: [{type: REVIEW}]
+        explanation:
+          exec: "ยอดรับของมากกว่ายอด PO"
+          audit: "GR exceeds PO sku={ap.sku} (qty_gr={ap.qty_gr}, qty_po={ap.qty_po}, over_gr_qty={ap.over_gr_qty})"
 
       - rule_id: A-QTY-02
         group: QUANTITY
@@ -282,8 +273,10 @@ domains:
           field: inv_exceeds_gr
           operator: "=="
           value: false
-        fail_actions:
-          - REVIEW
+        fail_actions: [{type: REVIEW}]
+        explanation:
+          exec: "ยอดใบแจ้งหนี้มากกว่ายอดรับของ"
+          audit: "INV exceeds GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr}, over_inv_qty={ap.over_inv_qty})"
 
       - rule_id: A-PROCESS-01
         group: PROCESS
@@ -294,8 +287,10 @@ domains:
           field: inv_without_gr
           operator: "=="
           value: false
-        fail_actions:
-          - ESCALATE
+        fail_actions: [{type: ESCALATE}]
+        explanation:
+          exec: "มีใบแจ้งหนี้แต่ยังไม่มีใบรับของ (GRN)"
+          audit: "Invoice without GR sku={ap.sku} (qty_inv={ap.qty_inv}, qty_gr={ap.qty_gr})"
 
       - rule_id: A-PRICE-01
         group: PRICE
@@ -306,8 +301,10 @@ domains:
           field: price_within_tolerance
           operator: "=="
           value: true
-        fail_actions:
-          - REVIEW
+        fail_actions: [{type: REVIEW}]
+        explanation:
+          exec: "ราคาใบแจ้งหนี้ไม่ตรงกับ PO"
+          audit: "Price mismatch sku={ap.sku} (inv={ap.inv_unit_price}, po={ap.po_unit_price}, tol_abs={meta.defaults.tolerances.price_abs})"
 
       - rule_id: A-FRAUD-01
         group: FRAUD
@@ -318,12 +315,10 @@ domains:
           field: dup_invoice
           operator: "=="
           value: false
-        fail_actions:
-          - REVIEW
-
-# =========================================================
-# DECISION LOGIC
-# =========================================================
+        fail_actions: [{type: REVIEW}]
+        explanation:
+          exec: "พบใบแจ้งหนี้ซ้ำ"
+          audit: "Duplicate invoice (vendor={ap.vendor_id}, invoice={ap.invoice_number}, fp={ap.invoice_fp})"
 
 decision_logic:
   outcomes:

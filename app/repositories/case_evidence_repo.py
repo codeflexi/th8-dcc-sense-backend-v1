@@ -242,6 +242,8 @@ class CaseEvidenceRepository(BaseRepository):
                 evidence_id,
                 case_id,
                 group_id,
+                
+                source,
 
                 evidence_type,
                 anchor_type,

@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from fastapi.encoders import jsonable_encoder
 
 from app.repositories.base import BaseRepository
+from app.repositories.case_repo import CaseRepository
 
 
 class CaseDecisionResultRepository(BaseRepository):
@@ -18,6 +19,7 @@ class CaseDecisionResultRepository(BaseRepository):
 
     def __init__(self,sb):
         super().__init__(sb)
+        self.case_repo = CaseRepository(sb)
 
     def _encode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure supabase client never sees datetime/Decimal/UUID objects
@@ -112,7 +114,7 @@ class CaseDecisionResultRepository(BaseRepository):
 
         return res.data[0] if res.data else None
     
-        # =========================================================
+    # =========================================================
     # Enterprise: list decision results by case (+ optional run)
     # =========================================================
     def list_by_case(
@@ -128,6 +130,9 @@ class CaseDecisionResultRepository(BaseRepository):
             .table(self.RUN_TABLE)
             .select("run_id")
             .eq("case_id", case_id)
+            .eq("run_status", "COMPLETED")
+            .order("created_at", desc=True)
+            .limit(1)
         )
 
         if run_id:
@@ -135,7 +140,8 @@ class CaseDecisionResultRepository(BaseRepository):
 
         run_res = run_query.execute()
         run_ids = [r["run_id"] for r in (run_res.data or [])]
-
+        
+       
         if not run_ids:
             return []
 
@@ -162,3 +168,24 @@ class CaseDecisionResultRepository(BaseRepository):
         )
 
         return res.data or []
+
+    def sync_after_success(
+        self,
+        case_id: str,
+        run_id: str,
+        summary,
+    ):
+        """
+        summary ต้องมี:
+            - overall_decision
+            - risk_level
+            - confidence_avg
+        """
+
+        return self.case_repo.update_after_run(
+            case_id,
+            run_id=run_id,
+            decision=summary.overall_decision,
+            risk_level=summary.risk_level,
+            confidence=summary.confidence_avg,
+        )

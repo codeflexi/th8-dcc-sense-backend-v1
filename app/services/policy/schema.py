@@ -1,13 +1,15 @@
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-# ---------- META ----------
+# =========================================================
+# META
+# =========================================================
 
 class PolicyMetaDefaults(BaseModel):
     currency: Optional[str] = "THB"
-    rounding: Dict[str, Any] = {}
-    tolerances: Dict[str, Any] = {}
+    rounding: Dict[str, Any] = Field(default_factory=dict)
+    tolerances: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PolicyMeta(BaseModel):
@@ -18,7 +20,9 @@ class PolicyMeta(BaseModel):
     discovery: Optional[Dict[str, Any]] = None
 
 
-# ---------- RULE ----------
+# =========================================================
+# RULE
+# =========================================================
 
 class RuleExplanation(BaseModel):
     exec: Optional[str] = None
@@ -30,24 +34,42 @@ class RuleSpec(BaseModel):
     group: Optional[str] = None
     severity: Optional[str] = None
     description: Optional[str] = None
-    uses: Optional[List[str]] = []
-    logic: Dict[str, Any] = {}
-    fail_actions: Optional[List[Any]] = []
+    uses: List[str] = Field(default_factory=list)
+    logic: Dict[str, Any] = Field(default_factory=dict)
+    fail_actions: List[Any] = Field(default_factory=list)
     explanation: Optional[RuleExplanation] = None
 
 
-# ---------- DOMAIN ----------
+# =========================================================
+# TECHNIQUE
+# =========================================================
+
+class TechniqueSpec(BaseModel):
+    id: str
+    category: Optional[str] = None
+    description: Optional[str] = None
+    required_facts: List[str] = Field(default_factory=list)
+    gates: Dict[str, Any] = Field(default_factory=dict)
+    derive: Dict[str, Any] = Field(default_factory=dict)
+
+
+# =========================================================
+# DOMAIN
+# =========================================================
 
 class DomainSpec(BaseModel):
     description: Optional[str] = None
-    profile: Optional[Dict[str, Any]] = {}
-    calculations: Optional[Dict[str, Any]] = {}
-    rules: List[RuleSpec] = []
+    profile: Dict[str, Any] = Field(default_factory=dict)
+    calculations: Dict[str, Any] = Field(default_factory=dict)
+    rules: List[RuleSpec] = Field(default_factory=list)
+    techniques: Dict[str, TechniqueSpec] = Field(default_factory=dict)
 
 
-# ---------- ROOT ----------
+# =========================================================
+# ROOT
+# =========================================================
 
 class PolicyBundle(BaseModel):
     meta: PolicyMeta
     domains: Dict[str, DomainSpec]
-    decision_logic: Optional[Dict[str, Any]] = {}
+    decision_logic: Dict[str, Any] = Field(default_factory=dict)

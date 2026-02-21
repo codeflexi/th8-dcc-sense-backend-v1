@@ -48,7 +48,11 @@ class SelectionService:
     # Public API
     # =====================================================
     def select_for_case(self, case_id: str, domain_code: str) -> Dict[str, Any]:
-        policy = PolicyRegistry.get()
+        
+       
+        
+        policy = PolicyRegistry.get_bundle()
+        
         resolved_policy = resolve_domain_policy(policy, domain_code)
 
         currency_default = (
@@ -84,8 +88,25 @@ class SelectionService:
         resolved_policy,
     ) -> Dict[str, Any]:
         profile = resolved_policy.profile
-        techniques = resolved_policy.techniques
 
+# -------- baseline_priority safe --------
+        if isinstance(profile, dict):
+            baseline_priority = profile.get("baseline_priority", []) or []
+        else:
+            baseline_priority = getattr(profile, "baseline_priority", []) or []
+
+        # -------- techniques safe --------
+        techniques = getattr(resolved_policy, "techniques", None)
+
+        if not techniques:
+            bundle = PolicyRegistry.get_bundle()
+            domain = bundle.domains.get(group_ctx.get("domain"))
+            if domain:
+                techniques = getattr(domain, "techniques", None)
+
+        # 🔥 FINAL GUARD (ปิด error นี้ถาวร)
+        if not isinstance(techniques, dict):
+            techniques = {}
         trace: List[Dict[str, Any]] = []
         selected = None
 
@@ -95,7 +116,7 @@ class SelectionService:
             trace.append(selected)
             return self._result(group_ctx, selected, trace)
 
-        for tech_id in profile.baseline_priority:
+        for tech_id in baseline_priority:
             tech = techniques.get(tech_id)
             if not tech:
                 continue

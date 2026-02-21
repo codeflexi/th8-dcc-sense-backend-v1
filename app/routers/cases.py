@@ -1,6 +1,4 @@
 from fastapi import APIRouter, Header, HTTPException , Depends, Query , Request
-from sqlalchemy import text 
-
 from app.services.case.case_service import CaseService
 from app.services.case.case_models import CreateCaseFromPORequest,CaseResponse
 from app.services.signal.signal_extraction_service import SignalExtractionService
@@ -17,9 +15,13 @@ from app.schemas.decision_run_view_model import DecisionRunViewContext
 from app.services.policy.registry import PolicyRegistry
 
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List ,Optional
 
 from app.services.case.case_service import CaseService
+from app.services.audit.audit_timeline_builder import AuditTimelineBuilder
+from app.services.audit.audit_models import AuditTimelineContext
+from app.repositories.audit_repo import AuditRepository
+from app.services.audit.audit_timeline_builder_v1 import AuditTimelineBuilderV1
 import uuid
 
 
@@ -228,15 +230,18 @@ def process_case(
 
     return result    
 
-async def _load_raw_decision_run(request: Request, case_id: str, run_id: str):
+async def _load_raw_decision_run(request: Request, case_id: str):
 
     sb = request.state.sb
     repo = CaseDecisionResultRepository(sb)
-    
-    _validate_uuid(case_id, "case_id")
-    _validate_uuid(run_id, "run_id")
 
-    results = repo.list_by_case(case_id=case_id, run_id=run_id)
+    _validate_uuid(case_id, "case_id")
+
+    # repo คืน list[dict]
+    results: list[dict] = repo.list_by_case(case_id=case_id) or []
+
+    # derive run_id จาก item แรก (ถ้ามี)
+    run_id = results[0].get("run_id") if results else None
 
     return {
         "case_id": case_id,
@@ -244,7 +249,6 @@ async def _load_raw_decision_run(request: Request, case_id: str, run_id: str):
         "count": len(results),
         "results": results,
     }
-
    
 def _validate_uuid(v: str, name: str):
     try:
@@ -255,11 +259,32 @@ def _validate_uuid(v: str, name: str):
             detail=f"{name} is not valid uuid: {v}"
         )
 
-@router.get("/{case_id}/{run_id}/view", response_model=DecisionRunViewContext)
-async def get_decision_run_view(request: Request, case_id: str, run_id: str):
+@router.get("/cases/{case_id}/view", response_model=DecisionRunViewContext)
+async def get_decision_run_view(request: Request, case_id: str):
 
-    raw = await _load_raw_decision_run(request, case_id, run_id)
+    raw = await _load_raw_decision_run(request, case_id)
 
     policy_registry = PolicyRegistry.get()
 
     return to_decision_run_view_context(raw, policy_registry)
+
+@router.get("/cases/{case_id}/audit", response_model=AuditTimelineContext)
+async def get_case_audit(request: Request, case_id: str):
+
+    repo = AuditRepository(request.state.sb)
+
+    raw_events = repo.list_events_by_case(case_id)
+
+    return AuditTimelineBuilder.build(case_id, raw_events)
+
+@router.get("/cases/{case_id}/audit-timeline")
+async def get_case_timeline(request: Request, case_id: str):
+    sb = request.state.sb
+    repo = AuditRepository(sb)
+
+    raw_events = repo.list_events_by_case(case_id)
+
+    return AuditTimelineBuilder.build(
+        case_id=case_id,
+        raw_events=raw_events,
+    )
